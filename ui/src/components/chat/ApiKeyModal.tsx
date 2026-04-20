@@ -14,7 +14,7 @@
 // Licensed under the MIT License.
 
 import { useEffect, useMemo, useState } from 'react';
-import { fetchRsaPublicKey, verifyOpenAiApiKey } from '../../utils/crypto';
+import { verifyOpenAiApiKey } from '../../utils/crypto';
 import Input from '../ui/Input';
 import CollapsibleCard from '../ui/CollapsibleCard';
 import { config } from '../../config';
@@ -41,6 +41,55 @@ const TAB_LIST = [
     'LMStudio'
 ]
 
+const normalizeServerUrl = (value: string) => value.trim().replace(/\/+$/, '');
+
+const isPrivateIpv4Host = (host: string) => {
+    const parts = host.split('.').map(part => Number(part));
+    if (parts.length !== 4 || parts.some(part => Number.isNaN(part) || part < 0 || part > 255)) {
+        return false;
+    }
+
+    if (parts[0] === 10) {
+        return true;
+    }
+
+    if (parts[0] === 172 && parts[1] >= 16 && parts[1] <= 31) {
+        return true;
+    }
+
+    return parts[0] === 192 && parts[1] === 168;
+};
+
+const isLikelyLocalOpenAiServer = (value: string) => {
+    const normalized = normalizeServerUrl(value);
+    if (!normalized) {
+        return false;
+    }
+
+    try {
+        const url = new URL(normalized.includes('://') ? normalized : `http://${normalized}`);
+        const host = (url.hostname || '').toLowerCase();
+        return (
+            host === 'localhost' ||
+            host === '127.0.0.1' ||
+            host === '0.0.0.0' ||
+            host === 'host.docker.internal' ||
+            host.endsWith('.local') ||
+            isPrivateIpv4Host(host)
+        );
+    } catch {
+        return false;
+    }
+};
+
+const getVerifySuccessMessage = (baseUrl: string) =>
+    isLikelyLocalOpenAiServer(baseUrl) ? 'Local server connection successful!' : 'API key is valid!';
+
+const getVerifyFailureMessage = (baseUrl: string) =>
+    isLikelyLocalOpenAiServer(baseUrl)
+        ? 'Local server connection failed. Please check if the server is running and reachable.'
+        : 'Invalid API key. Please check and try again.';
+
 export function ApiKeyModal({ isOpen, onClose, onSave, initialApiKey = '', onConfigurationUpdated }: ApiKeyModalProps) {
     const [apiKey, setApiKey] = useState(initialApiKey);
     const [email, setEmail] = useState('');
@@ -56,8 +105,6 @@ export function ApiKeyModal({ isOpen, onClose, onSave, initialApiKey = '', onCon
     const [showOpenaiApiKey, setShowOpenaiApiKey] = useState(false);
     const [verifyingKey, setVerifyingKey] = useState(false);
     const [verificationResult, setVerificationResult] = useState<{success: boolean, message: string} | null>(null);
-    const [rsaPublicKey, setRsaPublicKey] = useState<string | null>(null);
-
     // Workflow LLM configuration
     const [workflowLLMApiKey, setWorkflowLLMApiKey] = useState('');
     const [workflowLLMBaseUrl, setWorkflowLLMBaseUrl] = useState('');
@@ -111,44 +158,24 @@ export function ApiKeyModal({ isOpen, onClose, onSave, initialApiKey = '', onCon
             setWorkflowLLMModel(savedWorkflowLLMModel);
         }
         
-        // Fetch RSA public key
-        const fetchPublicKey = async () => {
-            try {
-                const savedPublicKey = localStorage.getItem('rsaPublicKey');
-                if (savedPublicKey) {
-                    setRsaPublicKey(savedPublicKey);
-                } else {
-                    const publicKey = await fetchRsaPublicKey();
-                    setRsaPublicKey(publicKey);
-                    localStorage.setItem('rsaPublicKey', publicKey);
-                }
-            } catch (error) {
-                console.error('Failed to fetch RSA public key:', error);
-            }
-        };
-        
-        fetchPublicKey();
     }, [initialApiKey]);
 
     const handleVerifyOpenAiKey = async () => {
-        // Check if it looks like LMStudio URL
-        const isLMStudio = openaiBaseUrl.toLowerCase().includes('localhost') || 
-                          openaiBaseUrl.toLowerCase().includes('127.0.0.1') ||
-                          openaiBaseUrl.includes(':1234') ||
-                          openaiBaseUrl.includes(':1235');
+        const normalizedBaseUrl = normalizeServerUrl(openaiBaseUrl);
+        const canSkipApiKey = isLikelyLocalOpenAiServer(normalizedBaseUrl);
         
-        if (!openaiApiKey.trim() && !isLMStudio) {
+        if (!normalizedBaseUrl) {
             setVerificationResult({
                 success: false,
-                message: 'Please enter an API key or use LMStudio URL (localhost:1234)'
+                message: 'Please enter a server URL first.'
             });
             return;
         }
         
-        if (!rsaPublicKey && !isLMStudio) {
+        if (!openaiApiKey.trim() && !canSkipApiKey) {
             setVerificationResult({
                 success: false,
-                message: 'RSA public key not available. Please try again later.'
+                message: 'Please enter an API key or use a local OpenAI-compatible server URL.'
             });
             return;
         }
@@ -157,13 +184,11 @@ export function ApiKeyModal({ isOpen, onClose, onSave, initialApiKey = '', onCon
         setVerificationResult(null);
         
         try {
-            const isValid = await verifyOpenAiApiKey(openaiApiKey, openaiBaseUrl);
+            const isValid = await verifyOpenAiApiKey(openaiApiKey.trim(), normalizedBaseUrl);
             
             setVerificationResult({
                 success: isValid,
-                message: isValid ? 
-                    (isLMStudio ? 'LMStudio connection successful!' : 'API key is valid!') : 
-                    (isLMStudio ? 'LMStudio connection failed. Please check if LMStudio server is running.' : 'Invalid API key. Please check and try again.')
+                message: isValid ? getVerifySuccessMessage(normalizedBaseUrl) : getVerifyFailureMessage(normalizedBaseUrl)
             });
         } catch (error) {
             setVerificationResult({
@@ -176,15 +201,21 @@ export function ApiKeyModal({ isOpen, onClose, onSave, initialApiKey = '', onCon
     };
 
     const handleVerifyWorkflowLLMKey = async () => {
-        const isLMStudio = workflowLLMBaseUrl.toLowerCase().includes('localhost') || 
-                           workflowLLMBaseUrl.toLowerCase().includes('127.0.0.1') ||
-                           workflowLLMBaseUrl.includes(':1234') ||
-                           workflowLLMBaseUrl.includes(':1235');
+        const normalizedBaseUrl = normalizeServerUrl(workflowLLMBaseUrl);
+        const canSkipApiKey = isLikelyLocalOpenAiServer(normalizedBaseUrl);
 
-        if (!workflowLLMApiKey.trim() && !isLMStudio) {
+        if (!normalizedBaseUrl) {
             setWorkflowVerificationResult({
                 success: false,
-                message: 'Please enter an API key or use LMStudio URL (localhost:1234)'
+                message: 'Please enter Workflow LLM Server URL first'
+            });
+            return;
+        }
+
+        if (!workflowLLMApiKey.trim() && !canSkipApiKey) {
+            setWorkflowVerificationResult({
+                success: false,
+                message: 'Please enter an API key or use a local OpenAI-compatible server URL.'
             });
             return;
         }
@@ -192,12 +223,10 @@ export function ApiKeyModal({ isOpen, onClose, onSave, initialApiKey = '', onCon
         setVerifyingWorkflowLLM(true);
         setWorkflowVerificationResult(null);
         try {
-            const isValid = await verifyOpenAiApiKey(workflowLLMApiKey, workflowLLMBaseUrl);
+            const isValid = await verifyOpenAiApiKey(workflowLLMApiKey.trim(), normalizedBaseUrl);
             setWorkflowVerificationResult({
                 success: isValid,
-                message: isValid ? 
-                    (isLMStudio ? 'LMStudio connection successful!' : 'API key is valid!') : 
-                    (isLMStudio ? 'LMStudio connection failed. Please check if LMStudio server is running.' : 'Invalid API key. Please check and try again.')
+                message: isValid ? getVerifySuccessMessage(normalizedBaseUrl) : getVerifyFailureMessage(normalizedBaseUrl)
             });
         } catch (error) {
             setWorkflowVerificationResult({
@@ -320,6 +349,8 @@ export function ApiKeyModal({ isOpen, onClose, onSave, initialApiKey = '', onCon
         
         // Call configuration updated callback if OpenAI config has changed
         if ((hasOpenaiConfigChanged || hasWorkflowConfigChanged) && onConfigurationUpdated) {
+            localStorage.removeItem('models_time');
+            localStorage.removeItem('models_list');
             onConfigurationUpdated();
         }
         

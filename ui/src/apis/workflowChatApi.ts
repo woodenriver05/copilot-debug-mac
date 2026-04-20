@@ -63,6 +63,42 @@ const checkAndSaveApiKey = (response: Response) => {
   }
 };
 
+const normalizeBaseUrl = (baseUrl: string) => baseUrl.trim().replace(/\/+$/, '');
+
+const isOpenAiPlatformUrl = (baseUrl: string) => {
+  const normalizedBaseUrl = normalizeBaseUrl(baseUrl).toLowerCase();
+  return normalizedBaseUrl.includes('api.openai.com');
+};
+
+const applyOpenAiConfigHeaders = async (
+  headers: Record<string, string>,
+  openaiApiKey: string,
+  openaiBaseUrl: string,
+  rsaPublicKey?: string | null
+) => {
+  const normalizedBaseUrl = normalizeBaseUrl(openaiBaseUrl);
+  const trimmedApiKey = openaiApiKey.trim();
+
+  if (normalizedBaseUrl) {
+    headers['Openai-Base-Url'] = normalizedBaseUrl;
+  }
+
+  if (!trimmedApiKey) {
+    return;
+  }
+
+  headers['Openai-Api-Key'] = trimmedApiKey;
+
+  if (rsaPublicKey && isOpenAiPlatformUrl(normalizedBaseUrl)) {
+    try {
+      const encryptedApiKey = await encryptWithRsaPublicKey(trimmedApiKey, rsaPublicKey);
+      headers['Encrypted-Openai-Api-Key'] = encryptedApiKey;
+    } catch (error) {
+      console.error('Error encrypting OpenAI API key:', error);
+    }
+  }
+};
+
 
 
 export namespace WorkflowChatAPI {
@@ -256,20 +292,13 @@ export namespace WorkflowChatAPI {
         'Accept-Language': browserLanguage,
       };
       
-      // Add OpenAI configuration headers if available
-      if (openaiApiKey && openaiApiKey.trim() !== '' && rsaPublicKey) {
-        try {
-          headers['Openai-Base-Url'] = openaiBaseUrl;
-        } catch (error) {
-          console.error('Error encrypting OpenAI API key:', error);
-        }
-      }
+      await applyOpenAiConfigHeaders(headers, openaiApiKey, openaiBaseUrl, rsaPublicKey);
       // Add Workflow LLM headers if available
       if (workflowLLMBaseUrl) {
-        headers['Workflow-LLM-Base-Url'] = workflowLLMBaseUrl;
+        headers['Workflow-LLM-Base-Url'] = normalizeBaseUrl(workflowLLMBaseUrl);
       }
       if (workflowLLMApiKey) {
-        headers['Workflow-LLM-Api-Key'] = workflowLLMApiKey;
+        headers['Workflow-LLM-Api-Key'] = workflowLLMApiKey.trim();
       }
       if (workflowLLMModel) {
         headers['Workflow-LLM-Model'] = workflowLLMModel;
@@ -290,8 +319,6 @@ export namespace WorkflowChatAPI {
       let chatUrl = `/api/chat/invoke`
       if(intent && intent !== '') {
         chatUrl = `${BASE_URL}/api/chat/invoke`
-      } else {
-        headers['Openai-Api-Key'] = openaiApiKey;
       }
       const response = await fetch(chatUrl, {
         method: 'POST',
@@ -378,22 +405,13 @@ export namespace WorkflowChatAPI {
         'Accept-Language': browserLanguage,
       };
       
-      // Add OpenAI configuration headers if available
-      if (openaiApiKey && openaiApiKey.trim() !== '' && rsaPublicKey) {
-        try {
-          const encryptedApiKey = await encryptWithRsaPublicKey(openaiApiKey as string, rsaPublicKey as string);
-          headers['Encrypted-Openai-Api-Key'] = encryptedApiKey;
-          headers['Openai-Base-Url'] = openaiBaseUrl;
-        } catch (error) {
-          console.error('Error encrypting OpenAI API key:', error);
-        }
-      }
+      await applyOpenAiConfigHeaders(headers, openaiApiKey, openaiBaseUrl, rsaPublicKey);
       // Add Workflow LLM headers if available
       if (workflowLLMBaseUrl) {
-        headers['Workflow-LLM-Base-Url'] = workflowLLMBaseUrl;
+        headers['Workflow-LLM-Base-Url'] = normalizeBaseUrl(workflowLLMBaseUrl);
       }
       if (workflowLLMApiKey) {
-        headers['Workflow-LLM-Api-Key'] = workflowLLMApiKey;
+        headers['Workflow-LLM-Api-Key'] = workflowLLMApiKey.trim();
       }
       
       const response = await fetch(`${BASE_URL}/api/chat/get_optimized_workflow`, {
@@ -435,22 +453,13 @@ export namespace WorkflowChatAPI {
       'Accept-Language': browserLanguage,
     };
     
-    // Add OpenAI configuration headers if available
-    if (openaiApiKey && openaiApiKey.trim() !== '' && rsaPublicKey) {
-      try {
-        const encryptedApiKey = await encryptWithRsaPublicKey(openaiApiKey as string, rsaPublicKey as string);
-        headers['Encrypted-Openai-Api-Key'] = encryptedApiKey;
-        headers['Openai-Base-Url'] = openaiBaseUrl;
-      } catch (error) {
-        console.error('Error encrypting OpenAI API key:', error);
-      }
-    }
+    await applyOpenAiConfigHeaders(headers, openaiApiKey, openaiBaseUrl, rsaPublicKey);
     // Add Workflow LLM headers if available
     if (workflowLLMBaseUrl) {
-      headers['Workflow-LLM-Base-Url'] = workflowLLMBaseUrl;
+      headers['Workflow-LLM-Base-Url'] = normalizeBaseUrl(workflowLLMBaseUrl);
     }
     if (workflowLLMApiKey) {
-      headers['Workflow-LLM-Api-Key'] = workflowLLMApiKey;
+      headers['Workflow-LLM-Api-Key'] = workflowLLMApiKey.trim();
     }
     
     const response = await fetch(`${BASE_URL}/api/chat/get_node_info_by_types`, {
@@ -587,12 +596,22 @@ export namespace WorkflowChatAPI {
     
     const openaiApiKey = localStorage.getItem('openaiApiKey');
     if (openaiApiKey) {
-      headers['Openai-Api-Key'] = openaiApiKey;
+      headers['Openai-Api-Key'] = openaiApiKey.trim();
     }
     
     const openaiBaseUrl = localStorage.getItem('openaiBaseUrl');
     if (openaiBaseUrl) {
-      headers['Openai-Base-Url'] = openaiBaseUrl;
+      headers['Openai-Base-Url'] = normalizeBaseUrl(openaiBaseUrl);
+    }
+
+    const workflowLLMApiKey = localStorage.getItem('workflowLLMApiKey');
+    if (workflowLLMApiKey) {
+      headers['Workflow-LLM-Api-Key'] = workflowLLMApiKey.trim();
+    }
+
+    const workflowLLMBaseUrl = localStorage.getItem('workflowLLMBaseUrl');
+    if (workflowLLMBaseUrl) {
+      headers['Workflow-LLM-Base-Url'] = normalizeBaseUrl(workflowLLMBaseUrl);
     }
 
     const response = await fetch('/api/model_config', {
@@ -680,17 +699,13 @@ export namespace WorkflowChatAPI {
         'Accept-Language': browserLanguage,
       };
       
-      // Add OpenAI configuration headers if available
-      if (openaiApiKey && openaiApiKey.trim() !== '') {
-        headers['Openai-Api-Key'] = openaiApiKey;
-        headers['Openai-Base-Url'] = openaiBaseUrl;
-      }
+      await applyOpenAiConfigHeaders(headers, openaiApiKey, openaiBaseUrl);
       // Add Workflow LLM headers if available
       if (workflowLLMBaseUrl) {
-        headers['Workflow-LLM-Base-Url'] = workflowLLMBaseUrl;
+        headers['Workflow-LLM-Base-Url'] = normalizeBaseUrl(workflowLLMBaseUrl);
       }
       if (workflowLLMApiKey) {
-        headers['Workflow-LLM-Api-Key'] = workflowLLMApiKey;
+        headers['Workflow-LLM-Api-Key'] = workflowLLMApiKey.trim();
       }
       if (workflowLLMModel) {
         headers['Workflow-LLM-Model'] = workflowLLMModel;

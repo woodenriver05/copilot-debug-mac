@@ -38,7 +38,7 @@ import { mergeByKeyCombine } from "../utils/tools";
 import useLanguage from "../hooks/useLanguage";
 import StartLink from "../components/ui/StartLink";
 import StartPopView from "../components/ui/StartPopView";
-import { LocalStorageKeys, setLocalStorage } from "../utils/localStorageManager";
+import { getLocalStorage, LocalStorageKeys, setLocalStorage } from "../utils/localStorageManager";
 import TabButton from "../components/ui/TabButton";
 
 const BASE_URL = config.apiBaseUrl
@@ -180,7 +180,19 @@ export default function WorkflowChat({ onClose, visible = true, triggerUsage = f
     const [width, setWidth] = useState(window.innerWidth / 3);
     const [isResizing, setIsResizing] = useState(false);
     const [uploadedImages, setUploadedImages] = useState<UploadedImage[]>([]);
-    const [selectedModel, setSelectedModel] = useState<string>("gemini-2.5-flash");
+    const [selectedModel, setSelectedModel] = useState<string>(() => {
+        const savedSelectedModel = getLocalStorage(LocalStorageKeys.MODELS_POP_VIEW_SELECTED);
+        if (savedSelectedModel) {
+            return savedSelectedModel;
+        }
+
+        const savedWorkflowModel = localStorage.getItem('workflowLLMModel');
+        if (savedWorkflowModel && savedWorkflowModel.trim() !== '') {
+            return savedWorkflowModel.trim();
+        }
+
+        return "gemini-2.5-flash";
+    });
     const [height, setHeight] = useState<number>(window.innerHeight);
     const [topPosition, setTopPosition] = useState<number>(0);
     // 添加公告状态

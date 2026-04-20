@@ -12,7 +12,16 @@ Description: 这是默认设置,请设置`customMade`, 打开koroFileHeader查�
 import json
 from typing import List, Dict, Any
 from aiohttp import web
-from ..utils.globals import LLM_DEFAULT_BASE_URL, LMSTUDIO_DEFAULT_BASE_URL, OPENAI_API_KEY, OPENAI_BASE_URL, TENANT_ID, is_lmstudio_url
+from ..utils.globals import (
+    LLM_DEFAULT_BASE_URL,
+    LMSTUDIO_DEFAULT_BASE_URL,
+    OPENAI_API_KEY,
+    OPENAI_BASE_URL,
+    TENANT_ID,
+    WORKFLOW_LLM_API_KEY,
+    WORKFLOW_LLM_BASE_URL,
+    is_lmstudio_url,
+)
 import server
 import requests
 from ..utils.logger import log
@@ -48,7 +57,16 @@ async def list_models(request):
             })
         
         openai_api_key = request.headers.get('Openai-Api-Key') or OPENAI_API_KEY or ""
-        openai_base_url = request.headers.get('Openai-Base-Url') or OPENAI_BASE_URL or LLM_DEFAULT_BASE_URL
+        openai_base_url = request.headers.get('Openai-Base-Url') or OPENAI_BASE_URL or ""
+        workflow_llm_api_key = request.headers.get('Workflow-LLM-Api-Key') or WORKFLOW_LLM_API_KEY or ""
+        workflow_llm_base_url = request.headers.get('Workflow-LLM-Base-Url') or WORKFLOW_LLM_BASE_URL or ""
+
+        if not openai_base_url and workflow_llm_base_url:
+            openai_base_url = workflow_llm_base_url
+        if not openai_api_key and workflow_llm_api_key:
+            openai_api_key = workflow_llm_api_key
+        if not openai_base_url:
+            openai_base_url = LLM_DEFAULT_BASE_URL
 
         request_url = f"{openai_base_url}/models"
         
@@ -93,8 +111,17 @@ async def verify_openai_key(req):
         JSON response with success status and message
     """
     try:
-        openai_api_key = req.headers.get('Openai-Api-Key')
-        openai_base_url = req.headers.get('Openai-Base-Url', 'https://api.openai.com/v1')
+        openai_api_key = req.headers.get('Openai-Api-Key') or ""
+        openai_base_url = req.headers.get('Openai-Base-Url') or ""
+        workflow_llm_api_key = req.headers.get('Workflow-LLM-Api-Key') or ""
+        workflow_llm_base_url = req.headers.get('Workflow-LLM-Base-Url') or ""
+
+        if not openai_base_url and workflow_llm_base_url:
+            openai_base_url = workflow_llm_base_url
+        if not openai_api_key and workflow_llm_api_key:
+            openai_api_key = workflow_llm_api_key
+        if not openai_base_url:
+            openai_base_url = 'https://api.openai.com/v1'
         
         # Check if this is LMStudio
         is_lmstudio = is_lmstudio_url(openai_base_url)

@@ -44,6 +44,25 @@ except Exception:
     )
 
 from ..agent_factory import create_agent, diagnose_image, search_workflows
+from ..service.workflow_rewrite_tools import (
+    get_current_workflow,
+    update_workflow,
+    search_node_local,
+    get_node_infos,
+    remove_node,
+)
+from ..service.workflow_rewrite_agent import get_rewrite_expert_by_name
+
+LOCAL_TOOLS_REGISTRY = {
+    "search_workflows": search_workflows,
+    "diagnose_image": diagnose_image,
+    "get_current_workflow": get_current_workflow,
+    "update_workflow": update_workflow,
+    "search_node_local": search_node_local,
+    "get_node_infos": get_node_infos,
+    "remove_node": remove_node,
+    "get_rewrite_expert_by_name": get_rewrite_expert_by_name,
+}
 from ..service.workflow_rewrite_agent import create_workflow_rewrite_agent
 from ..service.message_memory import message_memory_optimize
 from ..utils.request_context import get_rewrite_context, get_session_id, get_config
@@ -351,54 +370,47 @@ def _extract_json_object_slice(text: str, start_index: int) -> tuple[str, int]:
 
 
 def _extract_pseudo_tool_calls(text: str) -> List[Dict[str, Any]]:
-    tool_names = (
-        "recall_workflow",
-        "gen_workflow",
-        "search_workflows",
-        "diagnose_image",
-    )
     calls: List[Dict[str, Any]] = []
     cursor = 0
 
     while cursor < len(text):
-        next_match = None
-        next_tool_name = None
-
-        for tool_name in tool_names:
-            marker = f"{tool_name}[ARGS]"
-            position = text.find(marker, cursor)
-            if position == -1:
-                continue
-            if next_match is None or position < next_match:
-                next_match = position
-                next_tool_name = tool_name
-
-        if next_match is None or next_tool_name is None:
+        position = text.find("[ARGS]", cursor)
+        if position == -1:
             break
-
-        marker_end = next_match + len(next_tool_name) + len("[ARGS]")
+            
+        # Find the tool name preceding [ARGS]
+        start_idx = position - 1
+        while start_idx >= 0 and (text[start_idx].isalnum() or text[start_idx] == '_'):
+            start_idx -= 1
+        
+        tool_name = text[start_idx+1:position]
+        if not tool_name:
+            cursor = position + 6
+            continue
+            
+        marker_end = position + 6
         json_start = marker_end
         while json_start < len(text) and text[json_start].isspace():
             json_start += 1
-
+            
         if json_start >= len(text) or text[json_start] != "{":
             cursor = marker_end
             continue
-
+            
         try:
             raw_json, call_end = _extract_json_object_slice(text, json_start)
             calls.append(
                 {
-                    "name": next_tool_name,
+                    "name": tool_name,
                     "args": json.loads(raw_json),
-                    "start": next_match,
+                    "start": start_idx + 1,
                     "end": call_end,
                 }
             )
             cursor = call_end
         except Exception as parse_error:
             log.warning(
-                f"[MCP] Failed to parse pseudo tool call for {next_tool_name}: {parse_error}"
+                f"[MCP] Failed to parse pseudo tool call for {tool_name}: {parse_error}"
             )
             cursor = marker_end
 
@@ -487,7 +499,11 @@ def _parse_tool_result_payload(
         tool_ext = tool_output_data.get("ext")
         if isinstance(tool_ext, list):
             for ext_item in tool_ext:
-                if ext_item.get("type") in {"workflow_update", "param_update"}:
+                if ext_item.get("type") in {
+                    "workflow_update",
+                    "param_update",
+                    "workflow",
+                }:
                     workflow_update_ext = tool_ext
                     break
 
@@ -561,14 +577,10 @@ async def _bridge_pseudo_tool_calls(
             continue
 
         try:
-            if tool_name in ("search_workflows",):
-                query = str(tool_args.get("query") or "").strip()
-                log.info(
-                    f"[MCP] Bridging pseudo local tool '{tool_name}' with query: {query}"
-                )
-                local_tool = search_workflows
-                local_args = {"query": query}
-                local_json = json.dumps(local_args, ensure_ascii=False)
+            if tool_name in LOCAL_TOOLS_REGISTRY:
+                log.info(f"[MCP] Bridging pseudo local tool '{tool_name}' with args: {tool_args}")
+                local_tool = LOCAL_TOOLS_REGISTRY[tool_name]
+                local_json = json.dumps(tool_args, ensure_ascii=False)
                 local_ctx = ToolContext(
                     context=None,
                     usage=Usage(),
@@ -577,22 +589,6 @@ async def _bridge_pseudo_tool_calls(
                     tool_arguments=local_json,
                 )
                 raw_payload = await local_tool.on_invoke_tool(local_ctx, local_json)
-            elif tool_name == "diagnose_image":
-                image_path = str(tool_args.get("image_path") or "").strip()
-                question = str(tool_args.get("question") or "").strip()
-                log.info(
-                    f"[MCP] Bridging pseudo local tool 'diagnose_image' with image_path: {image_path}"
-                )
-                local_args = {"image_path": image_path, "question": question}
-                local_json = json.dumps(local_args, ensure_ascii=False)
-                local_ctx = ToolContext(
-                    context=None,
-                    usage=Usage(),
-                    tool_name=tool_name,
-                    tool_call_id=f"pseudo-{tool_name}",
-                    tool_arguments=local_json,
-                )
-                raw_payload = await diagnose_image.on_invoke_tool(local_ctx, local_json)
             else:
                 server = tool_server_map.get(tool_name)
                 if server is None:
@@ -666,28 +662,50 @@ async def comfyui_agent_invoke(
         if not session_id:
             raise ValueError("No session_id found in request context")
 
-        # Only low-risk conversational chat should bypass the local tool/execution path.
+        last_user_msg = _latest_user_message_text(messages)
         # Action-oriented requests (generation, workflow edits, diagnostics) must stay on
         # the local Copilot path so workflow ext data can flow back into ComfyUI.
-        last_user_msg = _latest_user_message_text(messages)
-        if _should_passthrough_rag_agent(messages, images):
-            try:
-                log.info(
-                    f"[MCP] Routing simple chat directly to RAG agent for query: {last_user_msg}"
-                )
-                response_text = await pass_through_rag_agent(
-                    last_user_msg, session_id=session_id
-                )
-                ext_with_finished = {"data": None, "finished": True}
-                yield (response_text, ext_with_finished)
-                return
-            except Exception as e:
-                log.error(f"[MCP] Error passing to RAG agent: {e}")
-                # Fall back to local execution if pass-through fails.
-        elif last_user_msg:
-            log.info(
-                f"[MCP] Keeping local tool path for action-oriented query: {last_user_msg[:160]}"
+        if last_user_msg:
+            # Simple heuristic intent classification
+            gen_keywords = [
+                "만들",
+                "생성",
+                "그려",
+                "추가",
+                "바꿔",
+                "수정",
+                "create",
+                "generate",
+                "draw",
+                "추천",
+                "workflow",
+                "워크플로우",
+                "변경",
+                "해줘",
+            ]
+            is_generation_intent = any(
+                kw in last_user_msg.lower() for kw in gen_keywords
             )
+
+            if not is_generation_intent:
+                # Only low-risk conversational chat should bypass the local tool/execution path.
+                try:
+                    log.info(
+                        f"[MCP] Routing simple chat directly to RAG agent for query: {last_user_msg}"
+                    )
+                    response_text = await pass_through_rag_agent(
+                        last_user_msg, session_id=session_id
+                    )
+                    ext_with_finished = {"data": None, "finished": True}
+                    yield (response_text, ext_with_finished)
+                    return
+                except Exception as e:
+                    log.error(f"[MCP] Error passing to RAG agent: {e}")
+                    # Fall back to local execution if pass-through fails.
+            else:
+                log.info(
+                    f"[MCP] Keeping local tool path for action-oriented query: {last_user_msg[:160]}"
+                )
 
         def _strip_trailing_whitespace_from_messages(
             msgs: List[Dict[str, Any]],
@@ -1100,7 +1118,29 @@ You must adhere to the following constraints to complete the task:
                                 try:
                                     import json
 
-                                    tool_output_data = json.loads(tool_output_data_str)
+                                    # event.item.output might already be a dict or a string
+                                    if isinstance(event.item.output, dict):
+                                        tool_output_data = event.item.output
+                                    elif isinstance(event.item.output, str):
+                                        tool_output_data = json.loads(event.item.output)
+                                    else:
+                                        tool_output_data = json.loads(
+                                            str(event.item.output)
+                                        )
+
+                                    if "result" in tool_output_data and isinstance(
+                                        tool_output_data["result"], str
+                                    ):
+                                        try:
+                                            # Unwrap FastMCP "result" wrapper
+                                            tool_output_data = json.loads(
+                                                tool_output_data["result"]
+                                            )
+                                        except json.JSONDecodeError:
+                                            tool_output_data = {
+                                                "text": tool_output_data["result"]
+                                            }
+
                                     if (
                                         "ext" in tool_output_data
                                         and tool_output_data["ext"]
@@ -1108,12 +1148,11 @@ You must adhere to the following constraints to complete the task:
                                         # Store all ext items from tool output, not just workflow_update
                                         tool_ext_items = tool_output_data["ext"]
                                         for ext_item in tool_ext_items:
-                                            if (
-                                                ext_item.get("type")
-                                                == "workflow_update"
-                                                or ext_item.get("type")
-                                                == "param_update"
-                                            ):
+                                            if ext_item.get("type") in {
+                                                "workflow_update",
+                                                "param_update",
+                                                "workflow",
+                                            }:
                                                 workflow_update_ext = tool_ext_items  # Store all ext items, not just one
                                                 log.info(
                                                     f"-- Captured workflow tool ext from tool output: {len(tool_ext_items)} items"

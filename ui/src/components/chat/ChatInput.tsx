@@ -168,7 +168,15 @@ export const ChatInput = forwardRef<ChatInputRef, ChatInputProps>(({
                     "name": "gpt-4.1-2025-04-14-GlobalStandard",
                     "image_enable": true,
                 }
-            ]
+            ];
+            const workflowLLMModel = localStorage.getItem('workflowLLMModel')?.trim();
+            if (workflowLLMModel && list.findIndex(model => model.name === workflowLLMModel) === -1) {
+                list.unshift({
+                    label: workflowLLMModel,
+                    name: workflowLLMModel,
+                    image_enable: true,
+                });
+            }
             updateModels(list);
         }
         setIsLoadingModels(false)

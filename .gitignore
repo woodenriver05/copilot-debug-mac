@@ -31,3 +31,8 @@ backup
 .cache
 # dev
 ui/yarn.lock
+# --- woodenriver debug/mac additions (2026-04-20) ---
+*.backup-*
+*.backup
+*.pre-*
+*.cpgz

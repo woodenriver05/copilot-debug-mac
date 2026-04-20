@@ -253,7 +253,7 @@ async def invoke_chat(request):
         status=200,
         reason="OK",
         headers={
-            "Content-Type": "application/json",
+            "Content-Type": "application/json; charset=utf-8",
             "X-Content-Type-Options": "nosniff",
         },
     )
@@ -373,7 +373,7 @@ async def invoke_chat(request):
                     ext=None,  # ext is only sent in final response
                 )
 
-                await response.write(json.dumps(chat_response).encode() + b"\n")
+                await response.write(json.dumps(chat_response).encode("utf-8") + b"\n")
                 previous_text_length = len(accumulated_text)
                 await asyncio.sleep(0.01)  # Small delay for streaming effect
 
@@ -391,7 +391,7 @@ async def invoke_chat(request):
             ext=ext_data,
         )
 
-        await response.write(json.dumps(final_response).encode() + b"\n")
+        await response.write(json.dumps(final_response).encode("utf-8") + b"\n")
 
         # AI响应不再存储到后端，前端负责消息存储
 
@@ -405,7 +405,7 @@ async def invoke_chat(request):
             format="text",
             ext=None,
         )
-        await response.write(json.dumps(error_response).encode() + b"\n")
+        await response.write(json.dumps(error_response).encode("utf-8") + b"\n")
 
     await response.write_eof()
     return response
@@ -566,7 +566,7 @@ async def invoke_debug(request):
         status=200,
         reason="OK",
         headers={
-            "Content-Type": "application/json",
+            "Content-Type": "application/json; charset=utf-8",
             "X-Content-Type-Options": "nosniff",
         },
     )
@@ -641,7 +641,7 @@ async def invoke_debug(request):
                                 ext=final_ext_data,  # 发送ext数据
                             )
                             await response.write(
-                                json.dumps(chat_response).encode() + b"\n"
+                                json.dumps(chat_response).encode("utf-8") + b"\n"
                             )
                         elif not finished:
                             # 只有文本更新，不发送ext数据
@@ -654,7 +654,7 @@ async def invoke_debug(request):
                                 ext=None,
                             )
                             await response.write(
-                                json.dumps(chat_response).encode() + b"\n"
+                                json.dumps(chat_response).encode("utf-8") + b"\n"
                             )
                     else:
                         # Legacy format: direct ext data (for backward compatibility)
@@ -670,7 +670,7 @@ async def invoke_debug(request):
                             format="markdown",
                             ext=ext,
                         )
-                        await response.write(json.dumps(chat_response).encode() + b"\n")
+                        await response.write(json.dumps(chat_response).encode("utf-8") + b"\n")
                 else:
                     # No ext data, just text streaming
                     chat_response = ChatResponse(
@@ -681,7 +681,7 @@ async def invoke_debug(request):
                         format="markdown",
                         ext=None,
                     )
-                    await response.write(json.dumps(chat_response).encode() + b"\n")
+                    await response.write(json.dumps(chat_response).encode("utf-8") + b"\n")
 
                 await asyncio.sleep(0.01)  # Small delay for streaming effect
 
@@ -740,7 +740,7 @@ async def invoke_debug(request):
                     f"Failed to save debug completion checkpoint: {checkpoint_error}"
                 )
 
-        await response.write(json.dumps(final_response).encode() + b"\n")
+        await response.write(json.dumps(final_response).encode("utf-8") + b"\n")
         log.info("Debug agent processing complete")
 
     except Exception as e:
@@ -757,7 +757,7 @@ async def invoke_debug(request):
             format="text",
             ext=[{"type": "error", "data": {"error": str(e)}}],
         )
-        await response.write(json.dumps(error_response).encode() + b"\n")
+        await response.write(json.dumps(error_response).encode("utf-8") + b"\n")
 
     await response.write_eof()
     return response
