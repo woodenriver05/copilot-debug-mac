@@ -251,7 +251,19 @@ export function ApiKeyModal({ isOpen, onClose, onSave, initialApiKey = '', onCon
             setWorkflowLLMModels(ids);
             // Do not auto-select a model; keep input unchanged so datalist shows all
         } catch (e) {
-            setWorkflowVerificationResult({ success: false, message: e instanceof Error ? e.message : 'Failed to fetch models' });
+            const reason = e instanceof Error ? e.message : 'Failed to fetch models';
+            // Preserve a preceding successful verification; model discovery is a
+            // separate step and should not turn connection success into a generic
+            // "Failed to fetch" error.
+            setWorkflowVerificationResult(prev => {
+                if (prev?.success) {
+                    return {
+                        success: true,
+                        message: `${prev.message} - Connection verified, but model list could not be loaded: ${reason}`,
+                    };
+                }
+                return { success: false, message: reason };
+            });
         } finally {
             setWorkflowLLMModelsLoading(false);
         }
