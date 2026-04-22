@@ -624,24 +624,24 @@ export namespace WorkflowChatAPI {
     return result as { models: { label: string; name: string; image_enable: boolean }[] };
   }
 
-  // Fetch models directly from an OpenAI-compatible LLM server via its /models endpoint
+  // Fetch models from an OpenAI-compatible LLM server through the ComfyUI backend.
   export async function listModelsFromLLM(
     baseUrl: string,
     apiKey?: string
   ): Promise<string[]> {
+    const normalizedBase = baseUrl.replace(/\/$/, '');
     const headers: Record<string, string> = {
       'accept': 'application/json',
+      'Openai-Base-Url': normalizedBase,
     };
 
     if (apiKey && apiKey.trim() !== '') {
-      headers['Authorization'] = `Bearer ${apiKey}`;
+      headers['Openai-Api-Key'] = apiKey.trim();
     }
 
-    // Normalize base URL to avoid double slashes
-    const normalizedBase = baseUrl.replace(/\/$/, '');
-    const url = `${normalizedBase}/models`;
-
-    const response = await fetch(url, {
+    // Fetch through the ComfyUI backend so browser CORS/PNA failures do not
+    // hide an otherwise healthy local Workflow LLM server.
+    const response = await fetch('/list_models_from_llm', {
       method: 'GET',
       headers,
     });

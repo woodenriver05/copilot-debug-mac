@@ -168,7 +168,58 @@ async def verify_openai_key(req):
         if 'base_url' in locals() and is_lmstudio_url(locals().get('openai_base_url', '')):
             error_message = f"LMStudio connection error: {str(e)}"
         return web.json_response({
-            "success": False, 
-            "data": False, 
+            "success": False,
+            "data": False,
             "message": error_message
         })
+
+
+@server.PromptServer.instance.routes.get("/list_models_from_llm")
+async def list_models_from_llm(req):
+    """
+    Server-side proxy for fetching an OpenAI-compatible /models list.
+
+    The Workflow LLM settings UI used to fetch the user-supplied LLM server
+    directly from the browser. That path is fragile for local servers because
+    CORS, browser extensions, and private-network restrictions can fail after
+    /verify_openai_key succeeds. Keep model discovery on the ComfyUI backend so
+    verification and model listing use the same network vantage point.
+    """
+    try:
+        base_url = (req.headers.get("Openai-Base-Url") or "").rstrip("/")
+        api_key = req.headers.get("Openai-Api-Key") or ""
+
+        if not base_url:
+            return web.json_response(
+                {"success": False, "message": "Missing Openai-Base-Url header"},
+                status=400,
+            )
+
+        headers = {"accept": "application/json"}
+        if api_key.strip():
+            headers["Authorization"] = f"Bearer {api_key.strip()}"
+
+        response = requests.get(f"{base_url}/models", headers=headers, timeout=10)
+        if response.status_code != 200:
+            return web.json_response(
+                {
+                    "success": False,
+                    "message": f"Upstream /models returned HTTP {response.status_code}",
+                },
+                status=response.status_code,
+            )
+
+        try:
+            return web.json_response(response.json())
+        except ValueError:
+            return web.json_response(
+                {"success": False, "message": "Upstream /models returned non-JSON"},
+                status=502,
+            )
+
+    except Exception as e:
+        log.error(f"Error listing models from LLM: {str(e)}")
+        return web.json_response(
+            {"success": False, "message": f"list_models_from_llm error: {str(e)}"},
+            status=500,
+        )
