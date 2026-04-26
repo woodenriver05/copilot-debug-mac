@@ -93,6 +93,14 @@ MCP_CONNECT_TIMEOUT_SECONDS = float(
     os.getenv("COPILOT_MCP_CONNECT_TIMEOUT_SECONDS", "30")
 )
 BING_MCP_DEFAULT_URL = "https://mcp.api-inference.modelscope.net/8c9fe550938e4f/sse"
+RUNTIME_PIPELINE_TOOL = "run_pipeline"
+WORKFLOW_RECALL_TOOL = "recall_workflow"
+LEGACY_WORKFLOW_GEN_TOOL = "gen_workflow"
+WORKFLOW_RESULT_TOOLS = (
+    RUNTIME_PIPELINE_TOOL,
+    WORKFLOW_RECALL_TOOL,
+    LEGACY_WORKFLOW_GEN_TOOL,
+)
 
 
 class ImageData:
@@ -268,6 +276,7 @@ def _should_passthrough_rag_agent(
         "change",
         "search_workflows",
         "diagnose_image",
+        "run_pipeline",
         "recall_workflow",
         "gen_workflow",
         "워크플로우",
@@ -331,6 +340,25 @@ def _should_attach_external_mcp(messages: List[Dict[str, Any]]) -> bool:
         return True
 
     return _is_explicit_web_search_request(messages)
+
+
+def _workflow_creation_contract() -> tuple[str, str]:
+    """Return the runtime workflow contract used in the chat router prompt."""
+    workflow_creation_instruction = f"""
+**CASE 3: RUN / SEARCH WORKFLOW**
+IF the user wants to find, generate, render, or execute a workflow.
+- Keywords: "create", "generate", "search", "find", "recommend", "render", "生成", "查找", "推荐".
+- Primary Action: Use `{RUNTIME_PIPELINE_TOOL}`.
+- Candidate-only Action: If the user explicitly asks to browse or compare existing workflows without running, use `{WORKFLOW_RECALL_TOOL}`.
+- When the user picks one, call `{RUNTIME_PIPELINE_TOOL}` with `template_db_id`.
+"""
+    workflow_constraint = f"""
+- [Critical!] For workflow generation/render requests, you MUST call `{RUNTIME_PIPELINE_TOOL}` as the primary path.
+- [Critical!] Do not call `{LEGACY_WORKFLOW_GEN_TOOL}` as the primary generation path.
+- [Critical!] The workflow graph must come from the RAG runtime/search path. Do not synthesize a new workflow from scratch in chat.
+- If the user asks only for candidates, call `{WORKFLOW_RECALL_TOOL}`; execution still goes through `{RUNTIME_PIPELINE_TOOL}`.
+"""
+    return workflow_creation_instruction, workflow_constraint
 
 
 def _extract_json_object_slice(text: str, start_index: int) -> tuple[str, int]:
@@ -892,27 +920,9 @@ async def comfyui_agent_invoke(
                 on_handoff=on_handoff,
             )
 
-            # Construct instructions based on DISABLE_WORKFLOW_GEN
-            if DISABLE_WORKFLOW_GEN:
-                workflow_creation_instruction = """
-**CASE 3: SEARCH WORKFLOW**
-IF the user wants to find or generate a NEW workflow.
-- Keywords: "create", "generate", "search", "find", "recommend", "生成", "查找", "推荐".
-- Action: Use `recall_workflow`.
-"""
-                workflow_constraint = """
-- [Critical!] When the user's intent is to get workflows or generate images with specific requirements, you MUST call `recall_workflow` tool to find existing similar workflows.
-"""
-            else:
-                workflow_creation_instruction = """
-**CASE 3: CREATE NEW / SEARCH WORKFLOW**
-IF the user wants to find or generate a NEW workflow from scratch.
-- Keywords: "create", "generate", "search", "find", "recommend", "生成", "查找", "推荐".
-- Action: Use `recall_workflow` AND `gen_workflow`.
-"""
-                workflow_constraint = """
-- [Critical!] When the user's intent is to get workflows or generate images with specific requirements, you MUST ALWAYS call BOTH recall_workflow tool AND gen_workflow tool to provide comprehensive workflow options. Never call just one of these tools - both are required for complete workflow assistance. First call recall_workflow to find existing similar workflows, then call gen_workflow to generate new workflow options.
-"""
+            workflow_creation_instruction, workflow_constraint = (
+                _workflow_creation_contract()
+            )
 
             agent = create_agent(
                 name="ComfyUI-Copilot",
@@ -1096,7 +1106,7 @@ You must adhere to the following constraints to complete the task:
                                 log.info(f"-- Tool '{tool_name}' was called")
 
                                 # Track workflow tools being called
-                                if tool_name in ["recall_workflow", "gen_workflow"]:
+                                if tool_name in WORKFLOW_RESULT_TOOLS:
                                     workflow_tools_called.add(tool_name)
                             elif event.item.type == "tool_call_output_item":
                                 log.info(f"-- Tool output: {event.item.output}")
@@ -1194,10 +1204,7 @@ You must adhere to the following constraints to complete the task:
                                         )
 
                                         # Track workflow tools that produced results
-                                        if tool_name in [
-                                            "recall_workflow",
-                                            "gen_workflow",
-                                        ]:
+                                        if tool_name in WORKFLOW_RESULT_TOOLS:
                                             log.info(
                                                 f"-- Workflow tool '{tool_name}' produced result with data: {len(data) if data else 0}"
                                             )
@@ -1396,7 +1403,7 @@ You must adhere to the following constraints to complete the task:
             # Process workflow tools results integration similar to reference facade.py
             workflow_tools_found = [
                 tool
-                for tool in ["recall_workflow", "gen_workflow"]
+                for tool in WORKFLOW_RESULT_TOOLS
                 if tool in tool_results
             ]
             finished = False  # Default finished state
@@ -1404,8 +1411,36 @@ You must adhere to the following constraints to complete the task:
             if workflow_tools_found:
                 log.info(f"Workflow tools called: {workflow_tools_found}")
 
+                if RUNTIME_PIPELINE_TOOL in tool_results:
+                    log.info(
+                        "run_pipeline was called, returning runtime pipeline result"
+                    )
+                    run_result = tool_results[RUNTIME_PIPELINE_TOOL]
+                    run_answer = run_result.get("answer")
+                    if (
+                        isinstance(run_answer, str)
+                        and run_answer.strip()
+                        and not current_text.strip()
+                    ):
+                        current_text = run_answer.strip()
+                    if run_result["ext"]:
+                        ext = run_result["ext"]
+                        log.info("Returning ext from run_pipeline")
+                    elif run_result["data"]:
+                        ext = [{"type": "workflow", "data": run_result["data"]}]
+                        log.info(
+                            f"Returning {len(run_result['data'])} data item(s) from run_pipeline"
+                        )
+                    else:
+                        ext = None
+                        log.info("run_pipeline returned no workflow ext/data")
+                    finished = True
+
                 # Check if both workflow tools were called
-                if "recall_workflow" in tool_results and "gen_workflow" in tool_results:
+                elif (
+                    WORKFLOW_RECALL_TOOL in tool_results
+                    and LEGACY_WORKFLOW_GEN_TOOL in tool_results
+                ):
                     log.info(
                         "Both recall_workflow and gen_workflow were called, merging results"
                     )
@@ -1413,7 +1448,7 @@ You must adhere to the following constraints to complete the task:
                     # Check each tool's success and merge results
                     successful_workflows = []
 
-                    recall_result = tool_results["recall_workflow"]
+                    recall_result = tool_results[WORKFLOW_RECALL_TOOL]
                     if recall_result["data"] and len(recall_result["data"]) > 0:
                         log.info(
                             f"recall_workflow succeeded with {len(recall_result['data'])} workflows"
@@ -1425,7 +1460,7 @@ You must adhere to the following constraints to complete the task:
                     else:
                         log.error("recall_workflow failed or returned no data")
 
-                    gen_result = tool_results["gen_workflow"]
+                    gen_result = tool_results[LEGACY_WORKFLOW_GEN_TOOL]
                     if gen_result["data"] and len(gen_result["data"]) > 0:
                         log.info(
                             f"gen_workflow succeeded with {len(gen_result['data'])} workflows"
@@ -1480,15 +1515,15 @@ You must adhere to the following constraints to complete the task:
                     finished = True
 
                 elif (
-                    "recall_workflow" in tool_results
-                    and "gen_workflow" not in tool_results
+                    WORKFLOW_RECALL_TOOL in tool_results
+                    and LEGACY_WORKFLOW_GEN_TOOL not in tool_results
                 ):
                     if DISABLE_WORKFLOW_GEN:
                         # If generation is disabled, we don't wait for gen_workflow
                         log.info(
                             "Only recall_workflow was called and generation is disabled, returning its result"
                         )
-                        recall_result = tool_results["recall_workflow"]
+                        recall_result = tool_results[WORKFLOW_RECALL_TOOL]
                         if recall_result["data"] and len(recall_result["data"]) > 0:
                             ext = [{"type": "workflow", "data": recall_result["data"]}]
                             log.info(
@@ -1507,12 +1542,12 @@ You must adhere to the following constraints to complete the task:
                         finished = False  # This is the key: keep finished=false to wait for gen_workflow
 
                 elif (
-                    "gen_workflow" in tool_results
-                    and "recall_workflow" not in tool_results
+                    LEGACY_WORKFLOW_GEN_TOOL in tool_results
+                    and WORKFLOW_RECALL_TOOL not in tool_results
                 ):
                     # Only gen_workflow was called, return its result normally
                     log.info("Only gen_workflow was called, returning its result")
-                    gen_result = tool_results["gen_workflow"]
+                    gen_result = tool_results[LEGACY_WORKFLOW_GEN_TOOL]
                     if gen_result["data"] and len(gen_result["data"]) > 0:
                         ext = [{"type": "workflow", "data": gen_result["data"]}]
                         log.info(
