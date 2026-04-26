@@ -70,7 +70,7 @@ from ..utils.logger import log
 from openai.types.responses import ResponseTextDeltaEvent
 from openai import APIError, RateLimitError
 from pydantic import BaseModel
-from .rag_agent_client import pass_through_rag_agent
+# pass_through_rag_agent caller removed: simple-chat bypass deleted (Phase 4 WO-COPILOT-LIVE-PATH-RECONCILE 2026-04-25)
 
 # Budget for MCP session initialization — wraps the full streamable-http
 # handshake (SSE endpoint event + initialize RPC + tool-list RPC) performed
@@ -83,7 +83,7 @@ from .rag_agent_client import pass_through_rag_agent
 # Why 30s (not 8) — 2026-04-13 Mac-side handoff:
 # On the very first MCP connection after a Mac MCP server restart, the Mac
 # side lazy-loads the Korean→English translator + RAG embedding models used
-# by recall_workflow / gen_workflow. This cold path was pushing the initial
+# by recall_workflow. This cold path was pushing the initial
 # tools/list round-trip well past the old 8s budget, which killed the chat
 # handler before any tool could run. Raising to 30s absorbs that cold start;
 # warm reconnects still take <200ms so there is no steady-state cost.
@@ -93,6 +93,7 @@ MCP_CONNECT_TIMEOUT_SECONDS = float(
     os.getenv("COPILOT_MCP_CONNECT_TIMEOUT_SECONDS", "30")
 )
 BING_MCP_DEFAULT_URL = "https://mcp.api-inference.modelscope.net/8c9fe550938e4f/sse"
+WORKFLOW_TOOL_NAMES = ("run_pipeline", "recall_workflow")  # deprecated generation tool removed (Phase 4)
 
 
 class ImageData:
@@ -269,7 +270,7 @@ def _should_passthrough_rag_agent(
         "search_workflows",
         "diagnose_image",
         "recall_workflow",
-        "gen_workflow",
+        "run_pipeline",
         "워크플로우",
         "이미지",
         "생성",
@@ -461,6 +462,43 @@ def _extract_text_from_mcp_result(call_result: Any) -> str:
     return "\n".join(parts).strip()
 
 
+def _build_run_pipeline_ext(parsed_result: Dict[str, Any]) -> Optional[List[Dict[str, Any]]]:
+    data = parsed_result.get("data")
+    if not isinstance(data, dict):
+        return None
+
+    selected_workflow = data.get("selected_workflow")
+    if not isinstance(selected_workflow, dict) or not selected_workflow:
+        return None
+
+    return [
+        {
+            "type": "workflow_update",
+            "data": {
+                "workflow_data": selected_workflow,
+                "source": "run_pipeline",
+                "workflow_id": data.get("workflow_id"),
+                "execution_status": data.get("execution_status"),
+                "prediction_id": data.get("prediction_id"),
+                "image_paths": data.get("image_paths") or [],
+                "vision_pipeline_status": data.get("vision_pipeline_status"),
+            },
+        }
+    ]
+
+
+def _merge_ext_items(
+    existing_ext: Any, promoted_ext: Optional[List[Dict[str, Any]]]
+) -> Optional[List[Dict[str, Any]]]:
+    if not promoted_ext:
+        return existing_ext
+    if isinstance(existing_ext, list):
+        return existing_ext + promoted_ext
+    if existing_ext:
+        return [existing_ext] + promoted_ext
+    return promoted_ext
+
+
 def _parse_tool_result_payload(
     tool_name: str, tool_output_data: Any
 ) -> tuple[Dict[str, Any], Optional[List[Dict[str, Any]]]]:
@@ -550,6 +588,14 @@ def _parse_tool_result_payload(
         f"[MCP] Parsed bridged tool result for '{tool_name}': "
         f"data={len(result['data']) if result['data'] else 0}, ext={result['ext'] is not None}"
     )
+    if tool_name == "run_pipeline":
+        promoted_ext = _build_run_pipeline_ext(result)
+        if promoted_ext:
+            result["ext"] = _merge_ext_items(result.get("ext"), promoted_ext)
+            workflow_update_ext = result["ext"]
+            log.info(
+                "[MCP] Promoted run_pipeline selected_workflow to workflow_update ext"
+            )
     return result, workflow_update_ext
 
 
@@ -666,46 +712,13 @@ async def comfyui_agent_invoke(
         # Action-oriented requests (generation, workflow edits, diagnostics) must stay on
         # the local Copilot path so workflow ext data can flow back into ComfyUI.
         if last_user_msg:
-            # Simple heuristic intent classification
-            gen_keywords = [
-                "만들",
-                "생성",
-                "그려",
-                "추가",
-                "바꿔",
-                "수정",
-                "create",
-                "generate",
-                "draw",
-                "추천",
-                "workflow",
-                "워크플로우",
-                "변경",
-                "해줘",
-            ]
-            is_generation_intent = any(
-                kw in last_user_msg.lower() for kw in gen_keywords
+            # Phase 4 WO-COPILOT-LIVE-PATH-RECONCILE (2026-04-25): simple-chat bypass
+            # to pass_through_rag_agent removed. All queries flow through the canonical
+            # LLM tool path; the LLM is instructed to call run_pipeline (search_only or
+            # execute mode) for any RAG-grounded request.
+            log.info(
+                f"[MCP] Routing all queries through canonical LLM tool path: {last_user_msg[:160]}"
             )
-
-            if not is_generation_intent:
-                # Only low-risk conversational chat should bypass the local tool/execution path.
-                try:
-                    log.info(
-                        f"[MCP] Routing simple chat directly to RAG agent for query: {last_user_msg}"
-                    )
-                    response_text = await pass_through_rag_agent(
-                        last_user_msg, session_id=session_id
-                    )
-                    ext_with_finished = {"data": None, "finished": True}
-                    yield (response_text, ext_with_finished)
-                    return
-                except Exception as e:
-                    log.error(f"[MCP] Error passing to RAG agent: {e}")
-                    # Fall back to local execution if pass-through fails.
-            else:
-                log.info(
-                    f"[MCP] Keeping local tool path for action-oriented query: {last_user_msg[:160]}"
-                )
 
         def _strip_trailing_whitespace_from_messages(
             msgs: List[Dict[str, Any]],
@@ -898,20 +911,22 @@ async def comfyui_agent_invoke(
 **CASE 3: SEARCH WORKFLOW**
 IF the user wants to find or generate a NEW workflow.
 - Keywords: "create", "generate", "search", "find", "recommend", "生成", "查找", "推荐".
-- Action: Use `recall_workflow`.
+- Action: Use `run_pipeline` with `mode="search_only"`.
 """
                 workflow_constraint = """
-- [Critical!] When the user's intent is to get workflows or generate images with specific requirements, you MUST call `recall_workflow` tool to find existing similar workflows.
+- [Critical!] When the user's intent is to get workflows or generate images with specific requirements, you MUST call `run_pipeline` (single canonical RAG entrypoint). Use `mode="search_only"` while workflow generation is disabled.
 """
             else:
                 workflow_creation_instruction = """
 **CASE 3: CREATE NEW / SEARCH WORKFLOW**
-IF the user wants to find or generate a NEW workflow from scratch.
+IF the user wants to find, generate, render, or recommend a workflow/image.
 - Keywords: "create", "generate", "search", "find", "recommend", "生成", "查找", "推荐".
-- Action: Use `recall_workflow` AND `gen_workflow`.
+- Action: Use `run_pipeline`.
+  - For generate/render/create image requests, call `run_pipeline` with `mode="execute"`.
+  - For find/search/recommend-only requests, call `run_pipeline` with `mode="search_only"`.
 """
                 workflow_constraint = """
-- [Critical!] When the user's intent is to get workflows or generate images with specific requirements, you MUST ALWAYS call BOTH recall_workflow tool AND gen_workflow tool to provide comprehensive workflow options. Never call just one of these tools - both are required for complete workflow assistance. First call recall_workflow to find existing similar workflows, then call gen_workflow to generate new workflow options.
+- [Critical!] When the user's intent is to get workflows or generate images with specific requirements, you MUST call `run_pipeline` as the single canonical RAG entrypoint.
 """
 
             agent = create_agent(
@@ -938,7 +953,7 @@ IF the user wants to:
 
 **ACTION:**
 - You MUST IMMEDIATELY handoff to the `Workflow Rewrite Agent`.
-- DO NOT call any other tools (like search_node, gen_workflow).
+- DO NOT call any other tools (like search_node).
 - DO NOT ask for more details. Just handoff.
 
 **CASE 2: ANALYZE CURRENT WORKFLOW**
@@ -1096,7 +1111,7 @@ You must adhere to the following constraints to complete the task:
                                 log.info(f"-- Tool '{tool_name}' was called")
 
                                 # Track workflow tools being called
-                                if tool_name in ["recall_workflow", "gen_workflow"]:
+                                if tool_name in WORKFLOW_TOOL_NAMES:
                                     workflow_tools_called.add(tool_name)
                             elif event.item.type == "tool_call_output_item":
                                 log.info(f"-- Tool output: {event.item.output}")
@@ -1141,66 +1156,32 @@ You must adhere to the following constraints to complete the task:
                                                 "text": tool_output_data["result"]
                                             }
 
-                                    if (
-                                        "ext" in tool_output_data
-                                        and tool_output_data["ext"]
-                                    ):
-                                        # Store all ext items from tool output, not just workflow_update
-                                        tool_ext_items = tool_output_data["ext"]
-                                        for ext_item in tool_ext_items:
-                                            if ext_item.get("type") in {
-                                                "workflow_update",
-                                                "param_update",
-                                                "workflow",
-                                            }:
-                                                workflow_update_ext = tool_ext_items  # Store all ext items, not just one
-                                                log.info(
-                                                    f"-- Captured workflow tool ext from tool output: {len(tool_ext_items)} items"
-                                                )
-                                                break
-
-                                    if (
-                                        "text" in tool_output_data
-                                        and tool_output_data.get("text")
-                                    ):
-                                        parsed_output = json.loads(
-                                            tool_output_data["text"]
+                                    parsed_result, parsed_workflow_update_ext = (
+                                        _parse_tool_result_payload(
+                                            tool_name, tool_output_data
                                         )
-
-                                        # Handle case where parsed_output might be a list instead of dict
-                                        if isinstance(parsed_output, dict):
-                                            answer = parsed_output.get("answer")
-                                            data = parsed_output.get("data")
-                                            tool_ext = parsed_output.get("ext")
-                                        else:
-                                            # If it's a list or other type, handle gracefully
-                                            answer = None
-                                            data = (
-                                                parsed_output
-                                                if isinstance(parsed_output, list)
-                                                else None
-                                            )
-                                            tool_ext = None
-
-                                        # Store tool results similar to reference facade.py
-                                        tool_results[tool_name] = {
-                                            "answer": answer,
-                                            "data": data,
-                                            "ext": tool_ext,
-                                            "content_dict": parsed_output,
-                                        }
+                                    )
+                                    tool_results[tool_name] = parsed_result
+                                    if parsed_workflow_update_ext:
+                                        workflow_update_ext = parsed_workflow_update_ext
                                         log.info(
-                                            f"-- Stored result for tool '{tool_name}': data={len(data) if data else 0}, ext={tool_ext}"
+                                            f"-- Captured workflow ext from tool '{tool_name}': {len(parsed_workflow_update_ext)} items"
                                         )
 
-                                        # Track workflow tools that produced results
-                                        if tool_name in [
-                                            "recall_workflow",
-                                            "gen_workflow",
-                                        ]:
-                                            log.info(
-                                                f"-- Workflow tool '{tool_name}' produced result with data: {len(data) if data else 0}"
-                                            )
+                                    result_data = parsed_result.get("data")
+                                    result_len = (
+                                        len(result_data)
+                                        if hasattr(result_data, "__len__")
+                                        else 0
+                                    )
+                                    log.info(
+                                        f"-- Stored result for tool '{tool_name}': data={result_len}, ext={parsed_result.get('ext')}"
+                                    )
+
+                                    if tool_name in WORKFLOW_TOOL_NAMES:
+                                        log.info(
+                                            f"-- Workflow tool '{tool_name}' produced result with data: {result_len}"
+                                        )
 
                                 except (json.JSONDecodeError, TypeError) as e:
                                     # If not JSON or parsing fails, treat as regular text
@@ -1334,7 +1315,7 @@ You must adhere to the following constraints to complete the task:
             if bridged_pseudo_tools and not current_text:
                 # Pseudo-call syntax was stripped out but no bridged answer text
                 # remained. Load-bearing edge case: MCP server tools like
-                # recall_workflow / gen_workflow return structured workflow data
+                # recall_workflow returns structured workflow data
                 # via `result["data"]` and carry NO "answer" field at all, so
                 # bridged_answer_texts never gets populated for them. When the
                 # LLM emits only bare pseudo-calls with no surrounding prose,
@@ -1396,7 +1377,7 @@ You must adhere to the following constraints to complete the task:
             # Process workflow tools results integration similar to reference facade.py
             workflow_tools_found = [
                 tool
-                for tool in ["recall_workflow", "gen_workflow"]
+                for tool in WORKFLOW_TOOL_NAMES
                 if tool in tool_results
             ]
             finished = False  # Default finished state
@@ -1404,125 +1385,38 @@ You must adhere to the following constraints to complete the task:
             if workflow_tools_found:
                 log.info(f"Workflow tools called: {workflow_tools_found}")
 
-                # Check if both workflow tools were called
-                if "recall_workflow" in tool_results and "gen_workflow" in tool_results:
-                    log.info(
-                        "Both recall_workflow and gen_workflow were called, merging results"
-                    )
-
-                    # Check each tool's success and merge results
-                    successful_workflows = []
-
-                    recall_result = tool_results["recall_workflow"]
-                    if recall_result["data"] and len(recall_result["data"]) > 0:
-                        log.info(
-                            f"recall_workflow succeeded with {len(recall_result['data'])} workflows"
-                        )
-                        log.info(
-                            f"  - Workflow IDs: {[w.get('id') for w in recall_result['data']]}"
-                        )
-                        successful_workflows.extend(recall_result["data"])
+                if "run_pipeline" in tool_results:
+                    log.info("run_pipeline was called, returning canonical pipeline result")
+                    pipeline_result = tool_results["run_pipeline"]
+                    ext = pipeline_result.get("ext")
+                    if not current_text and pipeline_result.get("answer"):
+                        current_text = pipeline_result["answer"]
+                    if ext:
+                        ext_count = len(ext) if isinstance(ext, list) else 1
+                        log.info(f"Returning {ext_count} ext item(s) from run_pipeline")
                     else:
-                        log.error("recall_workflow failed or returned no data")
-
-                    gen_result = tool_results["gen_workflow"]
-                    if gen_result["data"] and len(gen_result["data"]) > 0:
-                        log.info(
-                            f"gen_workflow succeeded with {len(gen_result['data'])} workflows"
-                        )
-                        log.info(
-                            f"  - Workflow IDs: {[w.get('id') for w in gen_result['data']]}"
-                        )
-                        successful_workflows.insert(0, *gen_result["data"])
-                    else:
-                        log.error("gen_workflow failed or returned no data")
-
-                    # Remove duplicates based on workflow ID
-                    seen_ids = set()
-                    unique_workflows = []
-                    for workflow in successful_workflows:
-                        workflow_id = workflow.get("id")
-                        if workflow_id and workflow_id not in seen_ids:
-                            seen_ids.add(workflow_id)
-                            unique_workflows.append(workflow)
-                            log.info(
-                                f"  - Added unique workflow: {workflow_id} - {workflow.get('name', 'Unknown')}"
-                            )
-                        elif workflow_id:
-                            log.info(
-                                f"  - Skipped duplicate workflow: {workflow_id} - {workflow.get('name', 'Unknown')}"
-                            )
-                        else:
-                            # If no ID, add anyway (shouldn't happen but just in case)
-                            unique_workflows.append(workflow)
-                            log.info(
-                                f"  - Added workflow without ID: {workflow.get('name', 'Unknown')}"
-                            )
-
-                    log.info(
-                        f"Total workflows before deduplication: {len(successful_workflows)}"
-                    )
-                    log.info(
-                        f"Total workflows after deduplication: {len(unique_workflows)}"
-                    )
-
-                    # Create final ext structure
-                    if unique_workflows:
-                        ext = [{"type": "workflow", "data": unique_workflows}]
-                        log.info(
-                            f"Returning {len(unique_workflows)} workflows from successful tools"
-                        )
-                    else:
-                        ext = None
-                        log.error("No successful workflow data to return")
-
-                    # Both tools called, finished = True
+                        log.info("run_pipeline returned no ext; using text/data only")
                     finished = True
 
-                elif (
-                    "recall_workflow" in tool_results
-                    and "gen_workflow" not in tool_results
-                ):
-                    if DISABLE_WORKFLOW_GEN:
-                        # If generation is disabled, we don't wait for gen_workflow
+                # Phase 4 WO-COPILOT-LIVE-PATH-RECONCILE (2026-04-25): the deprecated
+                # generation-tool branches were removed. recall_workflow is the only
+                # remaining non-canonical workflow tool; if the LLM still calls it
+                # (e.g., for diagnostics or a generation-disabled deployment),
+                # return its data directly. The canonical entrypoint is run_pipeline,
+                # handled in the branch above.
+                elif "recall_workflow" in tool_results:
+                    log.info(
+                        "Only recall_workflow was called, returning its result"
+                    )
+                    recall_result = tool_results["recall_workflow"]
+                    if recall_result["data"] and len(recall_result["data"]) > 0:
+                        ext = [{"type": "workflow", "data": recall_result["data"]}]
                         log.info(
-                            "Only recall_workflow was called and generation is disabled, returning its result"
-                        )
-                        recall_result = tool_results["recall_workflow"]
-                        if recall_result["data"] and len(recall_result["data"]) > 0:
-                            ext = [{"type": "workflow", "data": recall_result["data"]}]
-                            log.info(
-                                f"Returning {len(recall_result['data'])} workflows from recall_workflow"
-                            )
-                        else:
-                            ext = None
-                            log.error("recall_workflow failed or returned no data")
-                        finished = True
-                    else:
-                        # Only recall_workflow was called, don't return ext, keep finished=false
-                        log.info(
-                            "Only recall_workflow was called, waiting for gen_workflow, not returning ext"
-                        )
-                        ext = None
-                        finished = False  # This is the key: keep finished=false to wait for gen_workflow
-
-                elif (
-                    "gen_workflow" in tool_results
-                    and "recall_workflow" not in tool_results
-                ):
-                    # Only gen_workflow was called, return its result normally
-                    log.info("Only gen_workflow was called, returning its result")
-                    gen_result = tool_results["gen_workflow"]
-                    if gen_result["data"] and len(gen_result["data"]) > 0:
-                        ext = [{"type": "workflow", "data": gen_result["data"]}]
-                        log.info(
-                            f"Returning {len(gen_result['data'])} workflows from gen_workflow"
+                            f"Returning {len(recall_result['data'])} workflows from recall_workflow"
                         )
                     else:
                         ext = None
-                        log.error("gen_workflow failed or returned no data")
-
-                    # Only gen_workflow called, finished = True
+                        log.error("recall_workflow failed or returned no data")
                     finished = True
             else:
                 # No workflow tools called, check if other tools or message output returned ext
@@ -1541,7 +1435,9 @@ You must adhere to the following constraints to complete the task:
             final_ext = ext
             if workflow_update_ext:
                 # workflow_update_ext is now a list of ext items, so extend rather than wrap
-                if isinstance(workflow_update_ext, list):
+                if ext == workflow_update_ext:
+                    final_ext = workflow_update_ext
+                elif isinstance(workflow_update_ext, list):
                     final_ext = workflow_update_ext + (ext if ext else [])
                 else:
                     # Backward compatibility: if it's a single item, wrap it
