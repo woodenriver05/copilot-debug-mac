@@ -326,7 +326,21 @@ def diagnose_image(image_path: str, question: str = "") -> str:
 
 def create_agent(**kwargs) -> Agent:
     # Fast path first — LLM should prefer search_workflows for simple lookups.
-    kwargs["tools"] = [search_workflows, diagnose_image]
+    # MUST merge caller-supplied tools (e.g. get_current_workflow) with factory
+    # defaults instead of overwriting. The pre-2026-04-20 behaviour silently
+    # dropped caller tools (regression in 99b665f3); see work-log
+    # 20260506_copilot_get_current_workflow_not_found_root_cause.md.
+    factory_defaults = [search_workflows, diagnose_image]
+    caller_tools = list(kwargs.pop("tools", []) or [])
+    seen: set[int] = set()
+    merged: list = []
+    for tool in caller_tools + factory_defaults:
+        key = id(tool)  # function_tool objects: dedup by identity
+        if key in seen:
+            continue
+        seen.add(key)
+        merged.append(tool)
+    kwargs["tools"] = merged
     # 通过用户配置拿/环境变量
     config = kwargs.pop("config") if "config" in kwargs else {}
     # 避免将 None 写入 headers
