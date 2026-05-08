@@ -44,7 +44,7 @@ async def list_models(request):
     try:
         log.info("Received list_models request")
         if TENANT_ID:
-            model_list = [ "gemini-2.5-flash", "gpt-5-nano", "gpt-5-mini", "gpt-5" ]
+            model_list = [ "gemini-3-flash-preview", "gpt-5-nano", "gpt-5-mini", "gpt-5" ]
             llm_config = []
             for model in model_list:
                 llm_config.append({

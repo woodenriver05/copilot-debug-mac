@@ -8,6 +8,7 @@ import { BaseMessage } from './BaseMessage';
 import { ChatResponse } from "../../../types/types";
 import { useRef } from "react";
 import Markdown from '../../ui/Markdown';
+import { hasSuccessfulWorkflowUpdate } from '../failureSurface';
 
 interface AIMessageProps {
   content: string;
@@ -68,10 +69,6 @@ export function AIMessage({ content, name = 'Assistant', avatar, format, onOptio
       const response = JSON.parse(content) as ChatResponse;
       const guides = response.ext?.find(item => item.type === 'guides')?.data || [];
       
-      // 检查是否有实时更新的ext数据
-      const hasWorkflowUpdate = response.ext?.some(item => item.type === 'workflow_update');
-      const hasParamUpdate = response.ext?.some(item => item.type === 'param_update');
-
       // Check if this is a special message type based on intent metadata
       if (metadata?.intent) {
         const intent = metadata.intent;
@@ -145,7 +142,7 @@ export function AIMessage({ content, name = 'Assistant', avatar, format, onOptio
         {(() => {
           try {
             const response = JSON.parse(content) as ChatResponse;
-            const hasWorkflowUpdate = response.ext?.some(item => item.type === 'workflow_update');
+            const hasWorkflowUpdate = hasSuccessfulWorkflowUpdate(response);
             const hasParamUpdate = response.ext?.some(item => item.type === 'param_update');
             
             if (!finished && (hasWorkflowUpdate || hasParamUpdate)) {
@@ -173,4 +170,4 @@ export function AIMessage({ content, name = 'Assistant', avatar, format, onOptio
       </div>
     </BaseMessage>
   );
-} 
+}

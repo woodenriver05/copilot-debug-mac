@@ -1,13 +1,21 @@
 // Copyright (C) 2025 AIDC-AI
 // Licensed under the MIT License.
 
-import { Message } from '../types/types';
+import type { Message } from '../types/types';
+import {
+  FAILURE_SURFACE_FORMATTER_BUILD_ID,
+  FAILURE_SURFACE_SCHEMA_VERSION,
+} from '../components/chat/failureSurface';
+import { FAILURE_SURFACE_CACHE_SCHEMA_VERSION } from './failureSurfaceStorageDebug';
 
 export interface ChatSession {
   id: string;
   firstMessage: string;
   lastUpdated: number;
   messages: Message[];
+  cacheSchemaVersion?: string;
+  failureSurfaceSchemaVersion?: string;
+  failureSurfaceFormatterBuildId?: string;
 }
 
 class IndexedDBManager {
@@ -31,7 +39,7 @@ class IndexedDBManager {
 
       request.onupgradeneeded = (event) => {
         const db = (event.target as IDBOpenDBRequest).result;
-        
+
         // Create object store for chat sessions
         if (!db.objectStoreNames.contains(this.storeName)) {
           const store = db.createObjectStore(this.storeName, { keyPath: 'id' });
@@ -55,7 +63,10 @@ class IndexedDBManager {
       id: sessionId,
       firstMessage: firstMessage.length > 50 ? firstMessage.substring(0, 50) + '...' : firstMessage,
       lastUpdated: Date.now(),
-      messages: messages
+      messages: messages,
+      cacheSchemaVersion: FAILURE_SURFACE_CACHE_SCHEMA_VERSION,
+      failureSurfaceSchemaVersion: FAILURE_SURFACE_SCHEMA_VERSION,
+      failureSurfaceFormatterBuildId: FAILURE_SURFACE_FORMATTER_BUILD_ID,
     };
 
     return new Promise((resolve, reject) => {
@@ -139,4 +150,4 @@ class IndexedDBManager {
   }
 }
 
-export const indexedDBManager = new IndexedDBManager(); 
+export const indexedDBManager = new IndexedDBManager();

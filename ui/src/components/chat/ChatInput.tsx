@@ -154,8 +154,8 @@ export const ChatInput = forwardRef<ChatInputRef, ChatInputProps>(({
             // Fallback to default models if API fails
             const list = [
                 {
-                    "label": "gemini-2.5-flash",
-                    "name": "gemini-2.5-flash",
+                    "label": "gemini-3-flash-preview",
+                    "name": "gemini-3-flash-preview",
                     "image_enable": true
                 },
                 {

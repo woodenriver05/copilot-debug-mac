@@ -1,0 +1,112 @@
+{
+  "cases": [
+    {
+      "name": "typed_failure_only",
+      "data": {
+        "execution_status": "failed",
+        "typed_failure": {
+          "stage": "search",
+          "typed_reason": "no_execution_ready_workflow",
+          "failure_reason": "no_execution_ready_workflow"
+        },
+        "dispatch_attempted": false,
+        "dispatch_status": "not_attempted",
+        "prompt_id": null,
+        "image_paths": [],
+        "run_id": 148
+      },
+      "expected": {
+        "failed_stage": "search",
+        "failure_reason": "no_execution_ready_workflow",
+        "retrieval_fail_reason": null,
+        "detects_direct_data": true,
+        "builds_failure_ext": true,
+        "no_unknown": true
+      }
+    },
+    {
+      "name": "runtime_path_evidence_only",
+      "data": {
+        "execution_status": "skipped",
+        "runtime_path_type": "no_execution_ready_fail_closed",
+        "closure_eligible": false,
+        "runtime_path_evidence": {
+          "retrieval_fail_reason": "no_execution_ready_workflow"
+        },
+        "dispatch_attempted": false,
+        "dispatch_status": "not_applicable",
+        "prompt_id": null,
+        "image_paths": []
+      },
+      "expected": {
+        "failed_stage": "search",
+        "failure_reason": "no_execution_ready_workflow",
+        "retrieval_fail_reason": "no_execution_ready_workflow",
+        "detects_direct_data": true,
+        "builds_failure_ext": true,
+        "no_unknown": true
+      }
+    },
+    {
+      "name": "top_level_retrieval_only",
+      "data": {
+        "execution_status": "skipped",
+        "retrieval_fail_reason": "no_execution_ready_workflow",
+        "dispatch_attempted": false,
+        "dispatch_status": "not_applicable",
+        "prompt_id": null,
+        "image_paths": [],
+        "run_id": "run-skipped"
+      },
+      "expected": {
+        "failed_stage": "search",
+        "failure_reason": "no_execution_ready_workflow",
+        "retrieval_fail_reason": "no_execution_ready_workflow",
+        "detects_direct_data": true,
+        "builds_failure_ext": true,
+        "no_unknown": true
+      }
+    },
+    {
+      "name": "top_level_retrieval_wins_over_runtime_evidence",
+      "data": {
+        "execution_status": "skipped",
+        "retrieval_fail_reason": "no_execution_ready_workflow",
+        "runtime_path_evidence": {
+          "retrieval_fail_reason": "runtime_evidence_should_not_win"
+        },
+        "dispatch_attempted": false,
+        "dispatch_status": "not_applicable",
+        "prompt_id": null,
+        "image_paths": [],
+        "run_id": "run-conflict"
+      },
+      "expected": {
+        "failed_stage": "search",
+        "failure_reason": "no_execution_ready_workflow",
+        "retrieval_fail_reason": "no_execution_ready_workflow",
+        "detects_direct_data": true,
+        "builds_failure_ext": true,
+        "no_unknown": true
+      }
+    },
+    {
+      "name": "top_level_retrieval_without_execution_status",
+      "data": {
+        "retrieval_fail_reason": "no_execution_ready_workflow",
+        "dispatch_attempted": false,
+        "dispatch_status": "not_applicable",
+        "prompt_id": null,
+        "image_paths": []
+      },
+      "expected": {
+        "failed_stage": "search",
+        "failure_reason": "no_execution_ready_workflow",
+        "retrieval_fail_reason": "no_execution_ready_workflow",
+        "detects_direct_data": true,
+        "builds_failure_ext": true,
+        "no_unknown": true
+      }
+    }
+  ]
+}

@@ -8,11 +8,31 @@
  */
 import { defineConfig } from "vite";
 import react from "@vitejs/plugin-react";
-import { exec } from 'child_process';
+import { exec, execSync } from 'child_process';
 import path from 'path';
 import tailwindcss from 'tailwindcss';
 import autoprefixer from 'autoprefixer';
 import postcssNesting from 'postcss-nesting';
+
+const FALLBACK_FAILURE_SURFACE_BUILD_ID = '20260508-retrieval-fallback-v3';
+
+const getFailureSurfaceBuildId = () => {
+  const envBuildId = process.env.COPILOT_FAILURE_SURFACE_BUILD_ID?.trim();
+  if (envBuildId) {
+    return envBuildId;
+  }
+
+  const buildStamp = new Date().toISOString().replace(/[-:.TZ]/g, '').slice(0, 14);
+  try {
+    const commit = execSync('git rev-parse --short=12 HEAD', {
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'ignore'],
+    }).trim();
+    return commit ? `git-${commit}-${buildStamp}` : `local-${buildStamp}`;
+  } catch {
+    return buildStamp ? `local-${buildStamp}` : FALLBACK_FAILURE_SURFACE_BUILD_ID;
+  }
+};
 
 const rewriteImportPlugin = ({ isDev }) => {
   return {
@@ -36,6 +56,9 @@ const rewriteImportPlugin = ({ isDev }) => {
 // https://vitejs.dev/config/
 export default defineConfig(({ mode }) => ({
   envDir: ".",
+  define: {
+    __COPILOT_FAILURE_SURFACE_BUILD_ID__: JSON.stringify(getFailureSurfaceBuildId()),
+  },
   css: {
     postcss: {
       plugins: [

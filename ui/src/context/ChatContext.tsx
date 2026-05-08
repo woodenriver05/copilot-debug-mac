@@ -33,7 +33,7 @@ interface ChatState {
   screenState: ScreenState | null; // Add screen state
 }
 
-type ChatAction = 
+type ChatAction =
   | { type: 'SET_MESSAGES'; payload: Message[] }
   | { type: 'ADD_MESSAGE'; payload: Message }
   | { type: 'UPDATE_MESSAGE'; payload: Message }
@@ -66,7 +66,7 @@ function chatReducer(state: ChatState, action: ChatAction): ChatState {
     case 'UPDATE_MESSAGE':
       return {
         ...state,
-        messages: state.messages.map(msg => 
+        messages: state.messages.map(msg =>
           msg.id === action.payload.id && !msg.finished ? action.payload : msg
         )
       };
@@ -115,7 +115,7 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
   }
 
   const isDark = useDarkMode()
-  
+
   // 轮询下载进度
   const modelDownloadPolling = async () => {
     if (currentDownloadingId?.current?.length > 0) {
@@ -139,7 +139,7 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
           modelDownloadPolling()
         }, 2000)
       }
-    } 
+    }
   }
 
   // 新增id到下载id列表，开始轮询
@@ -165,13 +165,6 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
     getDownloadProgress()
   }, [])
 
-  // Update localStorage cache when messages or sessionId changes
-  useEffect(() => {
-    if (state.sessionId && state.messages.length > 0) {
-      localStorage.setItem(`messages_${state.sessionId}`, JSON.stringify(state.messages));
-    }
-  }, [state.messages, state.sessionId]);
-
   return (
     <ConfigProvider
       theme={{
@@ -194,8 +187,8 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
             rowHoverBg: isDark ? '#333' : '#fafafa',
           },
           Pagination: {
-            itemBg: isDark ? 'rgb(24, 24, 27)' : '#fff',  
-            itemActiveBg: isDark ? 'rgb(24, 24, 27)' : '#fff',  
+            itemBg: isDark ? 'rgb(24, 24, 27)' : '#fff',
+            itemActiveBg: isDark ? 'rgb(24, 24, 27)' : '#fff',
             colorText: isDark ? 'rgba(255,255,255,0.88)' : 'rgba(0,0,0,0.88)',
             colorBgTextHover: isDark ? '#555' : 'rgba(0,0,0,0.06)',
             colorPrimary: isDark ? '#aaa' : '#1677ff',
@@ -223,4 +216,4 @@ export function useChatContext() {
     throw new Error('useChatContext must be used within a ChatProvider');
   }
   return context;
-} 
+}

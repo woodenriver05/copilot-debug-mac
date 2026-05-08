@@ -20,6 +20,8 @@ import json
 import os
 import traceback
 from typing import List, Dict, Any, Optional
+from urllib.parse import quote
+from urllib.request import urlopen
 
 try:
     from agents._config import set_default_openai_api
@@ -94,6 +96,14 @@ MCP_CONNECT_TIMEOUT_SECONDS = float(
 )
 BING_MCP_DEFAULT_URL = "https://mcp.api-inference.modelscope.net/8c9fe550938e4f/sse"
 WORKFLOW_TOOL_NAMES = ("run_pipeline", "recall_workflow")  # deprecated generation tool removed (Phase 4)
+RUN_PIPELINE_FAILURE_EXT_TYPE = "run_pipeline_failure"
+RUN_PIPELINE_SUCCESS_STATUS = "success"
+COMFYUI_HISTORY_BASE_URL = os.getenv(
+    "COPILOT_COMFYUI_HISTORY_BASE_URL", "http://192.168.10.100:8188"
+).rstrip("/")
+COMFYUI_HISTORY_FETCH_TIMEOUT_SECONDS = float(
+    os.getenv("COPILOT_COMFYUI_HISTORY_FETCH_TIMEOUT_SECONDS", "3")
+)
 
 
 class ImageData:
@@ -462,15 +472,215 @@ def _extract_text_from_mcp_result(call_result: Any) -> str:
     return "\n".join(parts).strip()
 
 
+def _run_pipeline_image_paths(data: Dict[str, Any]) -> List[Any]:
+    image_paths = data.get("image_paths")
+    if isinstance(image_paths, list):
+        return image_paths
+    return []
+
+
+def _run_pipeline_generation_evidence(data: Dict[str, Any]) -> bool:
+    return bool(data.get("prompt_id")) and bool(_run_pipeline_image_paths(data))
+
+
+def _run_pipeline_has_typed_failure(data: Dict[str, Any]) -> bool:
+    execution_status = data.get("execution_status")
+    runtime_evidence = data.get("runtime_path_evidence")
+    runtime_retrieval_fail_reason = (
+        runtime_evidence.get("retrieval_fail_reason")
+        if isinstance(runtime_evidence, dict)
+        else None
+    )
+    return bool(
+        (execution_status and execution_status != RUN_PIPELINE_SUCCESS_STATUS)
+        or data.get("failed_stage")
+        or data.get("failure_reason")
+        or data.get("typed_failure")
+        or data.get("retrieval_fail_reason")
+        or data.get("runtime_path_type")
+        or data.get("closure_blocker_reason")
+        or runtime_retrieval_fail_reason
+    )
+
+
+def _run_pipeline_success_ready(data: Dict[str, Any]) -> bool:
+    return (
+        data.get("execution_status") == RUN_PIPELINE_SUCCESS_STATUS
+        and _run_pipeline_generation_evidence(data)
+    )
+
+
+def _stage_from_runtime_path_type(runtime_path_type: Any) -> Optional[str]:
+    if runtime_path_type == "no_execution_ready_fail_closed":
+        return "search"
+    if runtime_path_type == "fallback_composer_skeleton":
+        return "composer"
+    if runtime_path_type == "direct_prompt_bypass":
+        return "router"
+    return None
+
+
+def _stage_from_retrieval_fail_reason(retrieval_fail_reason: Any) -> Optional[str]:
+    if retrieval_fail_reason == "no_execution_ready_workflow":
+        return "search"
+    return None
+
+
+def _run_pipeline_failure_surface_data(data: Dict[str, Any]) -> Dict[str, Any]:
+    run_id = data.get("run_id") or data.get("prediction_id")
+    typed_failure = data.get("typed_failure")
+    if not isinstance(typed_failure, dict):
+        typed_failure = {}
+    runtime_evidence = data.get("runtime_path_evidence")
+    if not isinstance(runtime_evidence, dict):
+        runtime_evidence = {}
+    runtime_path_type = data.get("runtime_path_type")
+    retrieval_fail_reason = (
+        data.get("retrieval_fail_reason")
+        or runtime_evidence.get("retrieval_fail_reason")
+    )
+    failed_stage = (
+        data.get("failed_stage")
+        or typed_failure.get("stage")
+        or _stage_from_runtime_path_type(runtime_path_type)
+        or _stage_from_retrieval_fail_reason(retrieval_fail_reason)
+    )
+    failure_reason = (
+        data.get("failure_reason")
+        or typed_failure.get("failure_reason")
+        or typed_failure.get("typed_reason")
+        or data.get("closure_blocker_reason")
+        or retrieval_fail_reason
+    )
+    return {
+        "source": "run_pipeline",
+        "execution_status": data.get("execution_status"),
+        "failed_stage": failed_stage,
+        "failure_reason": failure_reason,
+        "dispatch_attempted": data.get("dispatch_attempted"),
+        "dispatch_status": data.get("dispatch_status"),
+        "prompt_id": data.get("prompt_id"),
+        "image_paths": _run_pipeline_image_paths(data),
+        "prediction_id": data.get("prediction_id"),
+        "run_id": run_id,
+        "run_id_label": "failed run evidence",
+        "typed_failure": typed_failure,
+        "runtime_path_type": runtime_path_type,
+        "closure_eligible": data.get("closure_eligible"),
+        "closure_blocker_reason": data.get("closure_blocker_reason"),
+        "retrieval_fail_reason": retrieval_fail_reason,
+        "runtime_path_evidence": runtime_evidence,
+        "workflow_id": data.get("workflow_id"),
+        "selected_template_id": data.get("selected_template_id")
+        or data.get("template_id"),
+    }
+
+
+def _build_run_pipeline_failure_ext(data: Dict[str, Any]) -> List[Dict[str, Any]]:
+    return [
+        {
+            "type": RUN_PIPELINE_FAILURE_EXT_TYPE,
+            "data": _run_pipeline_failure_surface_data(data),
+        }
+    ]
+
+
+def _is_renderable_workflow_data(workflow: Any) -> bool:
+    if not isinstance(workflow, dict) or not workflow:
+        return False
+
+    if workflow.get("summary_type") == "redacted_workflow_summary":
+        return False
+
+    ui_nodes = workflow.get("nodes")
+    if isinstance(ui_nodes, list):
+        return any(
+            isinstance(node, dict)
+            and isinstance(node.get("type"), str)
+            and bool(node.get("type"))
+            for node in ui_nodes
+        )
+
+    return any(
+        isinstance(node, dict)
+        and isinstance(node.get("class_type"), str)
+        and bool(node.get("class_type"))
+        and (
+            node.get("inputs") is None
+            or isinstance(node.get("inputs"), dict)
+        )
+        for node in workflow.values()
+    )
+
+
+def _workflow_from_comfyui_history(prompt_id: Any) -> Optional[Dict[str, Any]]:
+    if not prompt_id:
+        return None
+
+    prompt_id_text = str(prompt_id)
+    url = f"{COMFYUI_HISTORY_BASE_URL}/history/{quote(prompt_id_text, safe='')}"
+    try:
+        with urlopen(url, timeout=COMFYUI_HISTORY_FETCH_TIMEOUT_SECONDS) as response:
+            history_payload = json.loads(response.read().decode("utf-8"))
+    except Exception as history_error:
+        log.warning(
+            f"[MCP] Unable to fetch ComfyUI history for prompt_id={prompt_id_text}: "
+            f"{history_error}"
+        )
+        return None
+
+    if not isinstance(history_payload, dict):
+        return None
+
+    history_entry = history_payload.get(prompt_id_text)
+    if not isinstance(history_entry, dict) and isinstance(history_payload.get("prompt"), list):
+        history_entry = history_payload
+    if not isinstance(history_entry, dict):
+        log.warning(
+            f"[MCP] ComfyUI history response for prompt_id={prompt_id_text} "
+            "did not include a history entry"
+        )
+        return None
+
+    prompt = history_entry.get("prompt")
+    if (
+        isinstance(prompt, list)
+        and len(prompt) >= 3
+        and _is_renderable_workflow_data(prompt[2])
+    ):
+        return prompt[2]
+
+    log.warning(
+        f"[MCP] ComfyUI history for prompt_id={prompt_id_text} did not include "
+        "a renderable prompt graph"
+    )
+    return None
+
+
 def _build_run_pipeline_ext(parsed_result: Dict[str, Any]) -> Optional[List[Dict[str, Any]]]:
     data = parsed_result.get("data")
     if not isinstance(data, dict):
         return None
 
-    selected_workflow = data.get("selected_workflow")
-    if not isinstance(selected_workflow, dict) or not selected_workflow:
-        return None
+    if _run_pipeline_has_typed_failure(data):
+        return _build_run_pipeline_failure_ext(data)
 
+    selected_workflow = data.get("selected_workflow")
+    workflow_data_source = "selected_workflow"
+    if not _is_renderable_workflow_data(selected_workflow):
+        history_workflow = _workflow_from_comfyui_history(data.get("prompt_id"))
+        if _is_renderable_workflow_data(history_workflow):
+            selected_workflow = history_workflow
+            workflow_data_source = "comfyui_history_prompt"
+        else:
+            log.warning(
+                "[MCP] Skipping run_pipeline workflow_update because no renderable "
+                "workflow data was available "
+                f"(workflow_id={data.get('workflow_id')}, prompt_id={data.get('prompt_id')})"
+            )
+            return None
+
+    image_paths = _run_pipeline_image_paths(data)
     return [
         {
             "type": "workflow_update",
@@ -480,11 +690,145 @@ def _build_run_pipeline_ext(parsed_result: Dict[str, Any]) -> Optional[List[Dict
                 "workflow_id": data.get("workflow_id"),
                 "execution_status": data.get("execution_status"),
                 "prediction_id": data.get("prediction_id"),
-                "image_paths": data.get("image_paths") or [],
+                "run_id": data.get("run_id") or data.get("prediction_id"),
+                "prompt_id": data.get("prompt_id"),
+                "image_paths": image_paths,
+                "workflow_data_source": workflow_data_source,
+                "has_generated_image": _run_pipeline_success_ready(data),
                 "vision_pipeline_status": data.get("vision_pipeline_status"),
             },
         }
     ]
+
+
+def _run_pipeline_result_failed(parsed_result: Dict[str, Any]) -> bool:
+    data = parsed_result.get("data")
+    return isinstance(data, dict) and _run_pipeline_has_typed_failure(data)
+
+
+def _format_run_pipeline_value(value: Any) -> str:
+    if value is None or value == "":
+        return "null"
+    return str(value)
+
+
+def _canonical_run_pipeline_success_answer(data: Dict[str, Any]) -> str:
+    """Return an evidence-only success answer for run_pipeline results."""
+    status = data.get("execution_status") or RUN_PIPELINE_SUCCESS_STATUS
+    trace_id = data.get("trace_id")
+    run_id = data.get("run_id") or data.get("prediction_id")
+    prompt_id = data.get("prompt_id")
+    selected_template_id = data.get("selected_template_id") or data.get("template_id")
+    workflow_id = data.get("workflow_id")
+    image_paths = _run_pipeline_image_paths(data)
+    vision = data.get("vision_analysis")
+    if not isinstance(vision, dict):
+        vision = {}
+    vision_score = vision.get("overall_score")
+    vision_prompt_source = (
+        data.get("vision_prompt_source")
+        or vision.get("vision_prompt_source")
+        or "not_reported"
+    )
+
+    lines = [
+        "### Image Generation Complete",
+        "",
+        f"- execution_status: `{_format_run_pipeline_value(status)}`",
+        f"- trace_id: `{_format_run_pipeline_value(trace_id)}`",
+        f"- run_id: `{_format_run_pipeline_value(run_id)}`",
+        f"- prompt_id: `{_format_run_pipeline_value(prompt_id)}`",
+    ]
+    if selected_template_id is not None:
+        lines.append(
+            f"- selected_template_id: `{_format_run_pipeline_value(selected_template_id)}`"
+        )
+    if workflow_id is not None:
+        lines.append(f"- workflow_id: `{_format_run_pipeline_value(workflow_id)}`")
+    lines.append(f"- image_paths: `{len(image_paths)}`")
+    for image_path in image_paths:
+        lines.append(f"  - `{image_path}`")
+    if vision_score is not None:
+        lines.append(f"- vision_overall_score: `{_format_run_pipeline_value(vision_score)}`")
+        lines.append(
+            f"- vision_prompt_source: `{_format_run_pipeline_value(vision_prompt_source)}`"
+        )
+    else:
+        lines.append("- vision_overall_score: `not_reported`")
+
+    lines.extend(
+        [
+            "",
+            "Only the measured fields above are reported. Inspect the generated image and run evidence before making visual-content claims.",
+        ]
+    )
+    return "\n".join(lines)
+
+
+def _canonical_run_pipeline_failure_answer(data: Dict[str, Any]) -> str:
+    surface = _run_pipeline_failure_surface_data(data)
+    status = surface.get("execution_status") or "failed"
+    stage = surface.get("failed_stage") or "unknown"
+    reason = surface.get("failure_reason") or "unknown"
+    run_id = surface.get("run_id")
+    prompt_id = surface.get("prompt_id")
+    image_paths = surface.get("image_paths") or []
+    dispatch_attempted = surface.get("dispatch_attempted")
+    dispatch_status = surface.get("dispatch_status")
+    runtime_path_type = surface.get("runtime_path_type")
+    closure_blocker_reason = surface.get("closure_blocker_reason")
+    closure_eligible = surface.get("closure_eligible")
+    retrieval_fail_reason = surface.get("retrieval_fail_reason")
+
+    lines = [
+        "### Run Failed Before Image Generation",
+        "",
+        f"- execution_status: `{status}`",
+        f"- failed_stage: `{stage}`",
+        f"- failure_reason: `{reason}`",
+    ]
+    if dispatch_attempted is not None:
+        lines.append(f"- dispatch_attempted: `{dispatch_attempted}`")
+    if dispatch_status is not None:
+        lines.append(f"- dispatch_status: `{dispatch_status}`")
+    if runtime_path_type is not None:
+        lines.append(f"- runtime_path_type: `{runtime_path_type}`")
+    if closure_eligible is not None:
+        lines.append(f"- closure_eligible: `{closure_eligible}`")
+    if closure_blocker_reason is not None:
+        lines.append(f"- closure_blocker_reason: `{closure_blocker_reason}`")
+    if retrieval_fail_reason is not None:
+        lines.append(f"- retrieval_fail_reason: `{retrieval_fail_reason}`")
+    lines.extend(
+        [
+            f"- prompt_id: `{prompt_id}`",
+            f"- image_paths: `{len(image_paths)}`",
+        ]
+    )
+    if run_id is not None:
+        lines.append(f"- run_id: `{run_id}` (failed run evidence, not a generated image ID)")
+    lines.extend(
+        [
+            "",
+            "No image was generated, so image rating and image-based recovery actions are unavailable for this run.",
+        ]
+    )
+    return "\n".join(lines)
+
+
+def _ground_run_pipeline_final_text(
+    current_text: str,
+    pipeline_result: Dict[str, Any],
+) -> str:
+    """Return the final user-visible text for a run_pipeline result."""
+    data = pipeline_result.get("data")
+    if _run_pipeline_result_failed(pipeline_result) and isinstance(data, dict):
+        return _canonical_run_pipeline_failure_answer(data)
+    if isinstance(data, dict) and _run_pipeline_success_ready(data):
+        return _canonical_run_pipeline_success_answer(data)
+    if not current_text and pipeline_result.get("answer"):
+        return pipeline_result["answer"]
+    return current_text
 
 
 def _merge_ext_items(
@@ -497,6 +841,23 @@ def _merge_ext_items(
     if existing_ext:
         return [existing_ext] + promoted_ext
     return promoted_ext
+
+
+def _merge_final_workflow_ext(
+    ext: Any,
+    workflow_update_ext: Any,
+    *,
+    suppress_workflow_update_ext: bool = False,
+) -> Any:
+    if suppress_workflow_update_ext:
+        return ext
+    if not workflow_update_ext:
+        return ext
+    if ext == workflow_update_ext:
+        return workflow_update_ext
+    if isinstance(workflow_update_ext, list):
+        return workflow_update_ext + (ext if ext else [])
+    return [workflow_update_ext] + (ext if ext else [])
 
 
 def _parse_tool_result_payload(
@@ -593,9 +954,10 @@ def _parse_tool_result_payload(
         if promoted_ext:
             result["ext"] = _merge_ext_items(result.get("ext"), promoted_ext)
             workflow_update_ext = result["ext"]
-            log.info(
-                "[MCP] Promoted run_pipeline selected_workflow to workflow_update ext"
-            )
+            promoted_types = [
+                item.get("type") for item in promoted_ext if isinstance(item, dict)
+            ]
+            log.info(f"[MCP] Promoted run_pipeline result ext: {promoted_types}")
     return result, workflow_update_ext
 
 
@@ -1381,6 +1743,7 @@ You must adhere to the following constraints to complete the task:
                 if tool in tool_results
             ]
             finished = False  # Default finished state
+            run_pipeline_failed = False
 
             if workflow_tools_found:
                 log.info(f"Workflow tools called: {workflow_tools_found}")
@@ -1389,8 +1752,11 @@ You must adhere to the following constraints to complete the task:
                     log.info("run_pipeline was called, returning canonical pipeline result")
                     pipeline_result = tool_results["run_pipeline"]
                     ext = pipeline_result.get("ext")
-                    if not current_text and pipeline_result.get("answer"):
-                        current_text = pipeline_result["answer"]
+                    run_pipeline_failed = _run_pipeline_result_failed(pipeline_result)
+                    current_text = _ground_run_pipeline_final_text(
+                        current_text,
+                        pipeline_result,
+                    )
                     if ext:
                         ext_count = len(ext) if isinstance(ext, list) else 1
                         log.info(f"Returning {ext_count} ext item(s) from run_pipeline")
@@ -1432,18 +1798,20 @@ You must adhere to the following constraints to complete the task:
                 finished = True
 
             # Prepare final ext (debug_ext would be empty here since no debug events)
-            final_ext = ext
-            if workflow_update_ext:
-                # workflow_update_ext is now a list of ext items, so extend rather than wrap
-                if ext == workflow_update_ext:
-                    final_ext = workflow_update_ext
-                elif isinstance(workflow_update_ext, list):
-                    final_ext = workflow_update_ext + (ext if ext else [])
-                else:
-                    # Backward compatibility: if it's a single item, wrap it
-                    final_ext = [workflow_update_ext] + (ext if ext else [])
+            suppress_workflow_update_ext = "run_pipeline" in tool_results and run_pipeline_failed
+            final_ext = _merge_final_workflow_ext(
+                ext,
+                workflow_update_ext,
+                suppress_workflow_update_ext=suppress_workflow_update_ext,
+            )
+            if workflow_update_ext and not suppress_workflow_update_ext:
                 log.info(
-                    f"-- Including workflow_update ext in final response: {len(workflow_update_ext) if isinstance(workflow_update_ext, list) else 1} items"
+                    f"-- Including workflow surface ext in final response: {len(workflow_update_ext) if isinstance(workflow_update_ext, list) else 1} items"
+                )
+            elif workflow_update_ext:
+                log.info(
+                    "-- Suppressing non-run_pipeline workflow surface ext after "
+                    "run_pipeline failure"
                 )
 
             # Final yield with complete text, ext data, and finished status

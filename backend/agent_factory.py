@@ -381,7 +381,7 @@ def create_agent(**kwargs) -> Agent:
         model_from_config
         or model_from_kwargs
         or WORKFLOW_LLM_MODEL
-        or "gemini-2.5-flash"
+        or "gemini-3-flash-preview"
     )
     model = OpenAIChatCompletionsModel(model_name, openai_client=client)
 

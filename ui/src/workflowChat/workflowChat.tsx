@@ -40,6 +40,12 @@ import StartLink from "../components/ui/StartLink";
 import StartPopView from "../components/ui/StartPopView";
 import { getLocalStorage, LocalStorageKeys, setLocalStorage } from "../utils/localStorageManager";
 import TabButton from "../components/ui/TabButton";
+import {
+    persistFailureSurfaceMessages,
+    registerFailureSurfaceMemoryMessagesReader,
+    registerFailureSurfaceStorageDebug,
+    sanitizeFailureSurfaceCacheMessages,
+} from "../utils/failureSurfaceStorageDebug";
 
 const BASE_URL = config.apiBaseUrl
 
@@ -60,10 +66,10 @@ const enum DispatchEventType {
 // 优化公告组件样式 - 更加美观和专业，支持Markdown
 const Announcement = ({ message, onClose }: { message: string, onClose: () => void }) => {
     if (!message) return null;
-    
+
     return (
-        <div 
-            className="bg-gradient-to-r from-gray-50 to-gray-100 
+        <div
+            className="bg-gradient-to-r from-gray-50 to-gray-100
             border border-gray-300 px-2 py-1 mt-2 ml-2 mr-2 relative shadow-sm rounded-sm"
         >
             <div className="flex items-center">
@@ -105,7 +111,7 @@ const Announcement = ({ message, onClose }: { message: string, onClose: () => vo
                     </MemoizedReactMarkdown>
                 </div>
             </div>
-            <button 
+            <button
                 onClick={onClose}
                 className="absolute right-2 top-1/2 -translate-y-1/2 text-gray-700 hover:text-gray-800 transition-colors p-1 rounded-full hover:bg-gray-800"
                 aria-label="Close announcement"
@@ -123,13 +129,13 @@ const ParameterDebugTab = () => {
     const { state, dispatch } = useChatContext();
     const { selectedNode, screenState } = state;
     const selectedNodes = selectedNode ? selectedNode : [];
-    
-    // const ParameterDebugInterface = React.lazy(() => 
+
+    // const ParameterDebugInterface = React.lazy(() =>
     //   import("../components/debug/ParameterDebugInterfaceV2").then(module => ({
     //       default: module.ParameterDebugInterface
     //   }))
     // );
-    
+
     const handleCloseParameterDebug = () => {
         // Clear selected nodes and screen state
         dispatch({ type: 'SET_SELECTED_NODE', payload: null });
@@ -137,12 +143,12 @@ const ParameterDebugTab = () => {
         // 同时清除localStorage中保存的状态
         localStorage.removeItem("screenState");
     };
-    
+
     return (
         <div className="flex-1 flex flex-col overflow-y-auto">
-            <ParameterDebugInterface 
-                selectedNodes={selectedNodes} 
-                visible={true} 
+            <ParameterDebugInterface
+                selectedNodes={selectedNodes}
+                visible={true}
                 onClose={handleCloseParameterDebug}
             />
         </div>
@@ -150,20 +156,20 @@ const ParameterDebugTab = () => {
 };
 
 // Tab component
-// const TabButton = ({ 
-//     active, 
-//     onClick, 
-//     children 
-// }: { 
-//     active: boolean; 
-//     onClick: () => void; 
-//     children: React.ReactNode 
+// const TabButton = ({
+//     active,
+//     onClick,
+//     children
+// }: {
+//     active: boolean;
+//     onClick: () => void;
+//     children: React.ReactNode
 // }) => (
 //     <button
 //         onClick={onClick}
 //         className={`px-4 py-2 font-medium text-xs transition-colors duration-200 border-b-2 ${
-//             active 
-//                 ? "text-[#71A3F2] border-[#71A3F2]" 
+//             active
+//                 ? "text-[#71A3F2] border-[#71A3F2]"
 //                 : "text-gray-600 border-transparent hover:!text-[#71A3F2] hover:!border-[#71A3F2]"
 //         }`}
 //     >
@@ -191,7 +197,7 @@ export default function WorkflowChat({ onClose, visible = true, triggerUsage = f
             return savedWorkflowModel.trim();
         }
 
-        return "gemini-2.5-flash";
+        return "gemini-3-flash-preview";
     });
     const [height, setHeight] = useState<number>(window.innerHeight);
     const [topPosition, setTopPosition] = useState<number>(0);
@@ -202,6 +208,8 @@ export default function WorkflowChat({ onClose, visible = true, triggerUsage = f
     // const abortControllerRef = useRef<AbortController | null>(null);
     const currentSelectedNode = useRef<any>(selectedNode)
     const chatInputRef = useRef<ChatInputRef>(null);
+    const messagesRef = useRef<Message[]>(messages);
+    const clearedSessionIdsRef = useRef<Set<string>>(new Set());
     const [dispatchEventType, setDispatchEventType] = useState<DispatchEventType>(DispatchEventType.NONE);
     // 使用自定义 hooks，只在visible为true且activeTab为chat时启用
     useMousePosition(visible && activeTab === 'chat');
@@ -209,15 +217,25 @@ export default function WorkflowChat({ onClose, visible = true, triggerUsage = f
 
     const { chatinput_title } = useLanguage();
 
+    useEffect(() => {
+        messagesRef.current = messages;
+    }, [messages]);
+
     // Initialize IndexedDB
     useEffect(() => {
         indexedDBManager.init().catch(console.error);
+        registerFailureSurfaceStorageDebug();
+        registerFailureSurfaceMemoryMessagesReader(() => messagesRef.current);
+
+        return () => {
+            registerFailureSurfaceMemoryMessagesReader(null);
+        };
     }, []);
 
     // Auto-save messages to IndexedDB when they change
     useEffect(() => {
         if (messages.length > 0 && sessionId) {
-            updateMessagesCache(messages);
+            persistMessagesCache(messages);
         }
     }, [messages, sessionId]);
 
@@ -244,7 +262,7 @@ export default function WorkflowChat({ onClose, visible = true, triggerUsage = f
 
     useEffect(() => {
         if (activeTab !== 'chat') return;
-        
+
         const fetchInstalledNodes = async () => {
             const nodes = await getInstalledNodes();
             console.log('[WorkflowChat] Received installed nodes:', nodes.length);
@@ -269,14 +287,14 @@ export default function WorkflowChat({ onClose, visible = true, triggerUsage = f
             // First try to get from IndexedDB
             const indexedSession = await indexedDBManager.getSession(sid);
             if (indexedSession && indexedSession.messages.length > 0) {
-                dispatch({ type: 'SET_MESSAGES', payload: indexedSession.messages });
+                dispatch({ type: 'SET_MESSAGES', payload: sanitizeFailureSurfaceCacheMessages(indexedSession.messages) });
                 return;
             }
-            
+
             // If not found in IndexedDB, try API
             const data = await WorkflowChatAPI.fetchMessages(sid);
             if (data?.length > 0) {
-                dispatch({ type: 'SET_MESSAGES', payload: data });
+                dispatch({ type: 'SET_MESSAGES', payload: sanitizeFailureSurfaceCacheMessages(data) });
             } else {
                 showGuide()
             }
@@ -288,7 +306,7 @@ export default function WorkflowChat({ onClose, visible = true, triggerUsage = f
 
     useEffect(() => {
         if (activeTab !== 'chat') return;
-        
+
         let sid = localStorage.getItem("sessionId");
         if (sid) {
             dispatch({ type: 'SET_SESSION_ID', payload: sid });
@@ -307,7 +325,7 @@ export default function WorkflowChat({ onClose, visible = true, triggerUsage = f
         if (savedTab) {
             dispatch({ type: 'SET_ACTIVE_TAB', payload: savedTab });
         }
-        
+
         // 从localStorage恢复screenState状态（如果存在）
         const savedScreenState = localStorage.getItem("screenState");
         if (savedScreenState) {
@@ -336,12 +354,12 @@ export default function WorkflowChat({ onClose, visible = true, triggerUsage = f
             window.removeEventListener(COPILOT_EVENTS.TOOLBOX_DOWNSTREAMNODES, onToolBoxDownstreamNodes);
         }
     }, []);
-    
+
     // 当activeTab变化时保存到localStorage
     useEffect(() => {
         localStorage.setItem("activeTab", activeTab);
     }, [activeTab]);
-    
+
     // 当screenState变化时保存到localStorage
     useEffect(() => {
         if (state.screenState) {
@@ -352,13 +370,13 @@ export default function WorkflowChat({ onClose, visible = true, triggerUsage = f
     // 使用防抖处理宽度调整
     const handleMouseMoveForResize = React.useCallback((e: MouseEvent) => {
         if (!isResizing) return;
-        
+
         const newWidth = window.innerWidth - e.clientX;
         const clampedWidth = Math.min(
             Math.max(300, newWidth),
             window.innerWidth * 0.8
         );
-        
+
         setWidth(clampedWidth);
     }, [isResizing]);
 
@@ -400,7 +418,7 @@ export default function WorkflowChat({ onClose, visible = true, triggerUsage = f
         dispatch({ type: 'SET_LOADING', payload: true });
         if ((input.trim() === "" && !selectedNode) || !sessionId) return;
         setLatestInput(input);
-        
+
         const traceId = generateUUID();
 
         const userMessageId = generateUUID();
@@ -434,8 +452,8 @@ export default function WorkflowChat({ onClose, visible = true, triggerUsage = f
             let isFirstResponse = true;
 
             for await (const response of WorkflowChatAPI.streamInvokeServer(
-                sessionId, 
-                input, 
+                sessionId,
+                input,
                 uploadedImages.map(img => ({
                     url: img.url,
                     name: img.file.name
@@ -462,11 +480,6 @@ export default function WorkflowChat({ onClose, visible = true, triggerUsage = f
                     isFirstResponse = false;
                 } else {
                     dispatch({ type: 'UPDATE_MESSAGE', payload: aiMessage });
-                    // Update localStorage cache
-                    const updatedMessages = state.messages.map(msg => 
-                        msg.id === aiMessage.id && !msg.finished ? aiMessage : msg
-                    );
-                    updateMessagesCache(updatedMessages);
                 }
 
                 if (response.finished) {
@@ -492,7 +505,7 @@ export default function WorkflowChat({ onClose, visible = true, triggerUsage = f
         if (!sessionId) return;
         dispatch({ type: 'SET_LOADING', payload: true });
         setLatestInput(content);
-        
+
         const traceId = generateUUID();
 
         const userMessageId = generateUUID();
@@ -514,8 +527,8 @@ export default function WorkflowChat({ onClose, visible = true, triggerUsage = f
             let isFirstResponse = true;
 
             for await (const response of WorkflowChatAPI.streamInvokeServer(
-                sessionId, 
-                content, 
+                sessionId,
+                content,
                 uploadedImages.map(img => ({
                     url: img.url,
                     name: img.file.name
@@ -541,11 +554,6 @@ export default function WorkflowChat({ onClose, visible = true, triggerUsage = f
                     isFirstResponse = false;
                 } else {
                     dispatch({ type: 'UPDATE_MESSAGE', payload: aiMessage });
-                    // Update localStorage cache
-                    const updatedMessages = state.messages.map(msg => 
-                        msg.id === aiMessage.id && !msg.finished ? aiMessage : msg
-                    );
-                    updateMessagesCache(updatedMessages);
                 }
 
                 if (response.finished) {
@@ -579,12 +587,17 @@ export default function WorkflowChat({ onClose, visible = true, triggerUsage = f
         // Remove old session data
         const oldSessionId = state.sessionId;
         if (oldSessionId) {
+            clearedSessionIdsRef.current.add(oldSessionId);
             localStorage.removeItem(`messages_${oldSessionId}`);
+            void indexedDBManager.deleteSession(oldSessionId).catch((error) => {
+                console.error('Failed to delete session from IndexedDB:', error);
+            });
         }
         localStorage.removeItem("sessionId");
-        
+
         // Create new session
         const newSessionId = generateUUID();
+        clearedSessionIdsRef.current.delete(newSessionId);
         dispatch({ type: 'SET_SESSION_ID', payload: newSessionId });
         localStorage.setItem("sessionId", newSessionId);
         setTimeout(() => {
@@ -628,10 +641,10 @@ export default function WorkflowChat({ onClose, visible = true, triggerUsage = f
             let isFirstResponse = true;
 
             for await (const response of WorkflowChatAPI.streamInvokeServer(
-                sessionId, 
+                sessionId,
                 nodeName,
-                [], 
-                intent, 
+                [],
+                intent,
                 ext,
                 traceId,
                 abortControllerRef.current.signal,
@@ -656,11 +669,6 @@ export default function WorkflowChat({ onClose, visible = true, triggerUsage = f
                     isFirstResponse = false;
                 } else {
                     dispatch({ type: 'UPDATE_MESSAGE', payload: aiMessage });
-                    // Update localStorage cache
-                    const updatedMessages = state.messages.map(msg => 
-                        msg.id === aiMessage.id && !msg.finished ? aiMessage : msg
-                    );
-                    updateMessagesCache(updatedMessages);
                 }
 
                 if (response.finished) {
@@ -680,7 +688,7 @@ export default function WorkflowChat({ onClose, visible = true, triggerUsage = f
         }
     };
 
-    
+
     const onUsage = () => {
         handleSendMessageWithContent(`Reply in ${navigator.language} language: How does the ${selectedNode?.[0]?.type} node work? I need its official usage guide.`)
     }
@@ -691,10 +699,10 @@ export default function WorkflowChat({ onClose, visible = true, triggerUsage = f
 
     const getDownstreamSubgraphExt = () => {
         const nodeTypeSet = new Set<string>();
-        
+
         function findUpstreamNodes(node: any, depth: number) {
             if (!node || depth >= 1) return;
-            
+
             if (node.inputs) {
                 for (const input of Object.values(node.inputs)) {
                     const linkId = (input as any).link;
@@ -709,12 +717,12 @@ export default function WorkflowChat({ onClose, visible = true, triggerUsage = f
                 }
             }
         }
-    
+
         if (!!selectedNode[0]) {
             findUpstreamNodes(selectedNode[0], 0);
             return [{"type": "upstream_node_types", "data": Array.from(nodeTypeSet)}];
         }
-    
+
         return null;
     }
 
@@ -722,45 +730,32 @@ export default function WorkflowChat({ onClose, visible = true, triggerUsage = f
         handleSendMessageWithIntent('downstream_subgraph_search', getDownstreamSubgraphExt())
     }
 
-    // Utility function to update localStorage cache for messages
-    const updateMessagesCache = async (messages: Message[]) => {
-        if (state.sessionId) {
-            localStorage.setItem(`messages_${state.sessionId}`, JSON.stringify(messages));
-            // Also save to IndexedDB
-            try {
-                await indexedDBManager.saveSession(state.sessionId, messages);
-            } catch (error) {
-                console.error('Failed to save session to IndexedDB:', error);
-            }
+    const persistMessagesCache = async (messages: Message[]) => {
+        const sid = state.sessionId;
+        if (sid && !clearedSessionIdsRef.current.has(sid)) {
+            await persistFailureSurfaceMessages(sid, messages, (sessionId, messagesForCache) =>
+                indexedDBManager.saveSession(sessionId, messagesForCache),
+            );
         }
     };
 
     const handleAddMessage = (message: Message) => {
         console.log('[WorkflowChat] Adding new message:', message);
-        const updatedMessages = [...state.messages, message];
         dispatch({ type: 'ADD_MESSAGE', payload: message });
-        
-        // Update the localStorage cache and IndexedDB with the new message
-        updateMessagesCache(updatedMessages);
     };
 
     const handleUpdateMessage = (message: Message) => {
         // console.log('[WorkflowChat] Upadating message:', message);
-        const updatedMessages = state.messages.map(msg => 
-            msg.id === message.id && !msg.finished ? message : msg
-        );
         dispatch({ type: 'UPDATE_MESSAGE', payload: message });
-        
-        // Update the localStorage cache and IndexedDB with the new message
-        updateMessagesCache(updatedMessages);
     };
 
     const handleSelectSession = (sessionId: string, messages: Message[]) => {
+        const sanitizedMessages = sanitizeFailureSurfaceCacheMessages(messages);
+        clearedSessionIdsRef.current.delete(sessionId);
         // Clear current state and load new session
         dispatch({ type: 'SET_SESSION_ID', payload: sessionId });
-        dispatch({ type: 'SET_MESSAGES', payload: messages });
+        dispatch({ type: 'SET_MESSAGES', payload: sanitizedMessages });
         localStorage.setItem("sessionId", sessionId);
-        localStorage.setItem(`messages_${sessionId}`, JSON.stringify(messages));
     };
 
     const handleConfigurationUpdated = () => {
@@ -781,7 +776,7 @@ export default function WorkflowChat({ onClose, visible = true, triggerUsage = f
 
     const uploadImage = async (file: File, id: string) => {
         const formData = new FormData();
-        formData.append('file', file); 
+        formData.append('file', file);
         const response = await fetch(`${BASE_URL}/api/chat/imgfile2oss`, {
             method: 'POST',
             body: formData
@@ -853,13 +848,13 @@ export default function WorkflowChat({ onClose, visible = true, triggerUsage = f
     // 获取公告内容
     useEffect(() => {
         if (!visible || activeTab !== 'chat') return;
-        
+
         const fetchAnnouncement = async () => {
             try {
                 // 检查今天是否已经显示过公告
                 const today = new Date().toDateString();
                 const lastShownDate = localStorage.getItem('announcementLastShownDate');
-                
+
                 // 如果今天没有显示过公告，则显示
                 if (lastShownDate !== today) {
                     const message = await WorkflowChatAPI.fetchAnnouncement();
@@ -874,7 +869,7 @@ export default function WorkflowChat({ onClose, visible = true, triggerUsage = f
                 console.error('Error fetching announcement:', error);
             }
         };
-        
+
         fetchAnnouncement();
     }, [visible, activeTab]);
 
@@ -900,18 +895,18 @@ export default function WorkflowChat({ onClose, visible = true, triggerUsage = f
     if (!visible) return null;
 
     return (
-        <div 
+        <div
             className="flex flex-col h-full w-full bg-white relative"
-            style={{ 
+            style={{
                 display: visible ? 'flex' : 'none'
             }}
         >
             <div
                 className="absolute left-0 top-0 bottom-0 w-1 cursor-ew-resize hover:bg-gray-300"
             />
-            
+
             <div className="flex h-full flex-col">
-                <ChatHeader 
+                <ChatHeader
                     onClose={onClose}
                     onClear={handleClearMessages}
                     hasMessages={messages.length > 0}
@@ -920,38 +915,38 @@ export default function WorkflowChat({ onClose, visible = true, triggerUsage = f
                     currentSessionId={sessionId}
                     onConfigurationUpdated={handleConfigurationUpdated}
                 />
-                
+
                 {/* Tab navigation */}
                 <div className="flex border-b border-gray-200 mt-2">
-                    <TabButton 
+                    <TabButton
                         active={activeTab === 'chat'}
                         onClick={() => handleTabChange('chat')}
                     >
                         Chat
                     </TabButton>
-                    <TabButton 
+                    <TabButton
                         active={activeTab === 'parameter-debug'}
                         onClick={() => handleTabChange('parameter-debug')}
                     >
                         GenLab
                     </TabButton>
                 </div>
-                
+
                 {/* 将公告移到 ChatHeader 下方和Tab导航下方 */}
                 {showAnnouncement && announcement && activeTab === 'chat' && (
-                    <Announcement 
-                        message={announcement} 
-                        onClose={handleCloseAnnouncement} 
+                    <Announcement
+                        message={announcement}
+                        onClose={handleCloseAnnouncement}
                     />
                 )}
-                
+
                 {/* Tab content - Both tabs are mounted but only the active one is displayed */}
-                {/* <div 
+                {/* <div
                     className='flex-1 overflow-y-auto p-4 scroll-smooth h-0'
                     style={{ display: activeTab === 'chat' ? 'block' : 'none' }}
                     ref={messageDivRef}
                 > */}
-                    <MessageList 
+                    <MessageList
                         messages={messages}
                         latestInput={latestInput}
                         onOptionClick={handleOptionClick}
@@ -962,13 +957,13 @@ export default function WorkflowChat({ onClose, visible = true, triggerUsage = f
                         isActive={activeTab === 'chat'}
                     />
                 {/* </div> */}
-                
-                <div 
+
+                <div
                     className="border-t px-4 py-3 border-gray-200 bg-white sticky bottom-0"
                     style={{ display: activeTab === 'chat' ? 'block' : 'none' }}
                 >
                     {selectedNode && (
-                        <SelectedNodeInfo 
+                        <SelectedNodeInfo
                             nodeInfo={selectedNode}
                             onSendWithIntent={handleSendMessageWithIntent}
                             loading={loading}
@@ -976,7 +971,7 @@ export default function WorkflowChat({ onClose, visible = true, triggerUsage = f
                         />
                     )}
 
-                    <ChatInput 
+                    <ChatInput
                         ref={chatInputRef}
                         input={input}
                         loading={loading}
@@ -1004,7 +999,7 @@ export default function WorkflowChat({ onClose, visible = true, triggerUsage = f
                 </div>
 
                 {/* ParameterDebugTab - Always mounted but conditionally displayed */}
-                <div 
+                <div
                     className="flex-1 flex flex-col h-0"
                     style={{ display: activeTab === 'parameter-debug' ? 'flex' : 'none' }}
                 >

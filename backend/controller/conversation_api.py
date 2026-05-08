@@ -28,7 +28,7 @@ from ..dao.workflow_table import (
 )
 from ..service.mcp_client import comfyui_agent_invoke
 from ..utils.request_context import set_request_context, get_session_id
-from ..utils.logger import log
+from ..utils.logger import log, redact_secrets
 from ..utils.modelscope_gateway import ModelScopeGateway
 import folder_paths
 
@@ -325,7 +325,7 @@ async def invoke_chat(request):
         has_sent_response = False
         previous_text_length = 0
 
-        log.info(f"config: {config}")
+        log.info(f"config: {redact_secrets(config)}")
 
         # Pass messages in OpenAI format (images are now included in messages)
         # Config is now available through request context
@@ -578,7 +578,7 @@ async def invoke_debug(request):
     # Get configuration from headers (OpenAI settings)
     config = {
         "session_id": session_id,
-        "model": "gemini-2.5-flash",  # Default model for debug agents
+        "model": "gemini-3-flash-preview",  # Default model for debug agents
         **get_llm_config_from_headers(request),
     }
     # Apply .env-based defaults for LLM-related fields (config > .env > code defaults)
@@ -591,7 +591,7 @@ async def invoke_debug(request):
     # 设置请求上下文 - 为debug请求建立context隔离
     set_request_context(session_id, None, config)
 
-    log.info(f"Debug agent config: {config}")
+    log.info(f"Debug agent config: {redact_secrets(config)}")
     log.info(f"Session ID: {session_id}")
     log.info(
         f"Workflow nodes: {list(workflow_data.keys()) if workflow_data else 'None'}"

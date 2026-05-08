@@ -68,8 +68,12 @@ def _env_flag(name: str, default: bool = False) -> bool:
     return str(raw).strip().lower() in {"1", "true", "yes", "on"}
 
 
-def _http_get(url: str, timeout: float = 5.0) -> tuple[int, bytes]:
-    req = urllib.request.Request(url, method="GET")
+def _http_get(
+    url: str,
+    timeout: float = 5.0,
+    headers: dict[str, str] | None = None,
+) -> tuple[int, bytes]:
+    req = urllib.request.Request(url, headers=headers or {}, method="GET")
     with urllib.request.urlopen(req, timeout=timeout) as resp:
         return resp.status, resp.read()
 
@@ -131,9 +135,15 @@ def check_rag_auth(base: str) -> bool:
 
 def check_llm(base: str) -> bool:
     url = base.rstrip("/") + "/models"
+    api_key = (
+        os.environ.get("CC_OPENAI_API_KEY")
+        or os.environ.get("WORKFLOW_LLM_API_KEY")
+        or ""
+    ).strip()
+    headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
     t0 = time.perf_counter()
     try:
-        status, _body = _http_get(url, timeout=5.0)
+        status, _body = _http_get(url, timeout=5.0, headers=headers)
     except Exception as e:
         _log("FAIL", f"LLM /v1/models unreachable: {type(e).__name__}: {e}")
         return False
