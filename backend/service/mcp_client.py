@@ -97,7 +97,9 @@ MCP_CONNECT_TIMEOUT_SECONDS = float(
 BING_MCP_DEFAULT_URL = "https://mcp.api-inference.modelscope.net/8c9fe550938e4f/sse"
 WORKFLOW_TOOL_NAMES = ("run_pipeline", "recall_workflow")  # deprecated generation tool removed (Phase 4)
 RUN_PIPELINE_FAILURE_EXT_TYPE = "run_pipeline_failure"
+RUN_PIPELINE_SURFACE_CONTRACT_VIOLATION_EXT_TYPE = "run_pipeline_surface_contract_violation"
 RUN_PIPELINE_SUCCESS_STATUS = "success"
+RUN_PIPELINE_SURFACE_DECISION_SCHEMA_VERSION = "run-pipeline-surface-decision-v1"
 COMFYUI_HISTORY_BASE_URL = os.getenv(
     "COPILOT_COMFYUI_HISTORY_BASE_URL", "http://192.168.10.100:8188"
 ).rstrip("/")
@@ -483,24 +485,51 @@ def _run_pipeline_generation_evidence(data: Dict[str, Any]) -> bool:
     return bool(data.get("prompt_id")) and bool(_run_pipeline_image_paths(data))
 
 
-def _run_pipeline_has_typed_failure(data: Dict[str, Any]) -> bool:
-    execution_status = data.get("execution_status")
+def _run_pipeline_runtime_path_evidence(data: Dict[str, Any]) -> Dict[str, Any]:
     runtime_evidence = data.get("runtime_path_evidence")
-    runtime_retrieval_fail_reason = (
-        runtime_evidence.get("retrieval_fail_reason")
-        if isinstance(runtime_evidence, dict)
-        else None
-    )
-    return bool(
-        (execution_status and execution_status != RUN_PIPELINE_SUCCESS_STATUS)
-        or data.get("failed_stage")
-        or data.get("failure_reason")
-        or data.get("typed_failure")
-        or data.get("retrieval_fail_reason")
-        or data.get("runtime_path_type")
-        or data.get("closure_blocker_reason")
-        or runtime_retrieval_fail_reason
-    )
+    if isinstance(runtime_evidence, dict):
+        return runtime_evidence
+    return {}
+
+
+def _run_pipeline_matched_success_predicates(data: Dict[str, Any]) -> List[str]:
+    predicates: List[str] = []
+    if data.get("execution_status") == RUN_PIPELINE_SUCCESS_STATUS:
+        predicates.append("execution_status_success")
+    if data.get("prompt_id"):
+        predicates.append("prompt_id_present")
+    if _run_pipeline_image_paths(data):
+        predicates.append("image_paths_nonempty")
+    return predicates
+
+
+def _run_pipeline_matched_failure_predicates(data: Dict[str, Any]) -> List[str]:
+    execution_status = data.get("execution_status")
+    runtime_evidence = _run_pipeline_runtime_path_evidence(data)
+    predicates: List[str] = []
+    if execution_status and execution_status != RUN_PIPELINE_SUCCESS_STATUS:
+        predicates.append("execution_status_non_success")
+    if data.get("failed_stage"):
+        predicates.append("failed_stage_present")
+    if data.get("failure_reason"):
+        predicates.append("failure_reason_present")
+    if data.get("typed_failure"):
+        predicates.append("typed_failure_present")
+    if data.get("retrieval_fail_reason"):
+        predicates.append("retrieval_fail_reason_present")
+    if data.get("closure_blocker_reason"):
+        predicates.append("closure_blocker_reason_present")
+    if runtime_evidence.get("retrieval_fail_reason"):
+        predicates.append("runtime_path_evidence_retrieval_fail_reason_present")
+    return predicates
+
+
+def _run_pipeline_has_failure_evidence(data: Dict[str, Any]) -> bool:
+    return bool(_run_pipeline_matched_failure_predicates(data))
+
+
+def _run_pipeline_has_typed_failure(data: Dict[str, Any]) -> bool:
+    return _run_pipeline_has_failure_evidence(data)
 
 
 def _run_pipeline_success_ready(data: Dict[str, Any]) -> bool:
@@ -508,6 +537,94 @@ def _run_pipeline_success_ready(data: Dict[str, Any]) -> bool:
         data.get("execution_status") == RUN_PIPELINE_SUCCESS_STATUS
         and _run_pipeline_generation_evidence(data)
     )
+
+
+def _run_pipeline_surface_decision(data: Dict[str, Any]) -> Dict[str, Any]:
+    success_predicates = _run_pipeline_matched_success_predicates(data)
+    failure_predicates = _run_pipeline_matched_failure_predicates(data)
+    generated_image_success = _run_pipeline_success_ready(data)
+    contradictions: List[str] = []
+    selected_surface = "text_only"
+    first_surface_failure = None
+
+    if generated_image_success and failure_predicates:
+        selected_surface = "surface_contract_violation"
+        first_surface_failure = "response_formatter"
+        contradictions.append("failure_evidence_with_generated_image_success")
+        if data.get("failed_stage") in (None, "", "unknown") and data.get("failure_reason") in (
+            None,
+            "",
+            "unknown",
+        ):
+            contradictions.append("unknown_failure_surface_with_generated_image_success")
+    elif generated_image_success:
+        selected_surface = "workflow_update"
+    elif failure_predicates:
+        selected_surface = "run_pipeline_failure"
+
+    return {
+        "schema_version": RUN_PIPELINE_SURFACE_DECISION_SCHEMA_VERSION,
+        "selected_surface": selected_surface,
+        "selected_by": "run_pipeline_surface_classifier",
+        "matched_success_predicates": success_predicates,
+        "matched_failure_predicates": failure_predicates,
+        "contradictions": contradictions,
+        "first_surface_failure": first_surface_failure,
+    }
+
+
+def _run_pipeline_surface_lint(
+    data: Dict[str, Any], selected_surface: str
+) -> Dict[str, Any]:
+    image_paths = _run_pipeline_image_paths(data)
+    success_ready = _run_pipeline_success_ready(data)
+    typed_failure = data.get("typed_failure")
+    if not isinstance(typed_failure, dict):
+        typed_failure = {}
+    runtime_evidence = _run_pipeline_runtime_path_evidence(data)
+    retrieval_fail_reason = (
+        data.get("retrieval_fail_reason")
+        or runtime_evidence.get("retrieval_fail_reason")
+    )
+    failure_stage = (
+        data.get("failed_stage")
+        or typed_failure.get("stage")
+        or _stage_from_runtime_path_type(data.get("runtime_path_type"))
+        or _stage_from_retrieval_fail_reason(retrieval_fail_reason)
+    )
+    failure_reason = (
+        data.get("failure_reason")
+        or typed_failure.get("failure_reason")
+        or typed_failure.get("typed_reason")
+        or data.get("closure_blocker_reason")
+        or retrieval_fail_reason
+    )
+    violations: List[str] = []
+    warnings: List[str] = []
+
+    if success_ready and selected_surface == "run_pipeline_failure":
+        violations.append("execution_success_with_image_paths_selected_failure")
+    if selected_surface == "run_pipeline_failure" and (
+        failure_stage in (None, "", "unknown")
+        and failure_reason in (None, "", "unknown")
+    ):
+        violations.append("failure_surface_unknown_stage_and_reason")
+    if image_paths and selected_surface == "run_pipeline_failure":
+        violations.append("no_image_failure_text_conflicts_with_image_paths_nonempty")
+    if data.get("runtime_path_type") and not _run_pipeline_has_failure_evidence(data):
+        warnings.append("runtime_path_type_is_route_metadata_not_failure_evidence")
+
+    if violations:
+        status = "contract_violation"
+    elif warnings:
+        status = "warning"
+    else:
+        status = "ok"
+    return {
+        "status": status,
+        "violations": violations,
+        "warnings": warnings,
+    }
 
 
 def _stage_from_runtime_path_type(runtime_path_type: Any) -> Optional[str]:
@@ -531,10 +648,9 @@ def _run_pipeline_failure_surface_data(data: Dict[str, Any]) -> Dict[str, Any]:
     typed_failure = data.get("typed_failure")
     if not isinstance(typed_failure, dict):
         typed_failure = {}
-    runtime_evidence = data.get("runtime_path_evidence")
-    if not isinstance(runtime_evidence, dict):
-        runtime_evidence = {}
+    runtime_evidence = _run_pipeline_runtime_path_evidence(data)
     runtime_path_type = data.get("runtime_path_type")
+    surface_decision = _run_pipeline_surface_decision(data)
     retrieval_fail_reason = (
         data.get("retrieval_fail_reason")
         or runtime_evidence.get("retrieval_fail_reason")
@@ -557,6 +673,7 @@ def _run_pipeline_failure_surface_data(data: Dict[str, Any]) -> Dict[str, Any]:
         "execution_status": data.get("execution_status"),
         "failed_stage": failed_stage,
         "failure_reason": failure_reason,
+        "trace_id": data.get("trace_id"),
         "dispatch_attempted": data.get("dispatch_attempted"),
         "dispatch_status": data.get("dispatch_status"),
         "prompt_id": data.get("prompt_id"),
@@ -570,6 +687,10 @@ def _run_pipeline_failure_surface_data(data: Dict[str, Any]) -> Dict[str, Any]:
         "closure_blocker_reason": data.get("closure_blocker_reason"),
         "retrieval_fail_reason": retrieval_fail_reason,
         "runtime_path_evidence": runtime_evidence,
+        "surface_decision": surface_decision,
+        "surface_lint": _run_pipeline_surface_lint(
+            data, surface_decision["selected_surface"]
+        ),
         "workflow_id": data.get("workflow_id"),
         "selected_template_id": data.get("selected_template_id")
         or data.get("template_id"),
@@ -581,6 +702,47 @@ def _build_run_pipeline_failure_ext(data: Dict[str, Any]) -> List[Dict[str, Any]
         {
             "type": RUN_PIPELINE_FAILURE_EXT_TYPE,
             "data": _run_pipeline_failure_surface_data(data),
+        }
+    ]
+
+
+def _run_pipeline_surface_contract_violation_data(data: Dict[str, Any]) -> Dict[str, Any]:
+    surface_decision = _run_pipeline_surface_decision(data)
+    return {
+        "source": "run_pipeline",
+        "execution_status": data.get("execution_status"),
+        "failed_stage": "response_surface_adapter",
+        "failure_reason": "surface_classifier_contradiction",
+        "trace_id": data.get("trace_id"),
+        "dispatch_attempted": data.get("dispatch_attempted"),
+        "dispatch_status": data.get("dispatch_status"),
+        "prompt_id": data.get("prompt_id"),
+        "image_paths": _run_pipeline_image_paths(data),
+        "prediction_id": data.get("prediction_id"),
+        "run_id": data.get("run_id") or data.get("prediction_id"),
+        "runtime_path_type": data.get("runtime_path_type"),
+        "closure_eligible": data.get("closure_eligible"),
+        "closure_blocker_reason": data.get("closure_blocker_reason"),
+        "retrieval_fail_reason": data.get("retrieval_fail_reason")
+        or _run_pipeline_runtime_path_evidence(data).get("retrieval_fail_reason"),
+        "runtime_path_evidence": _run_pipeline_runtime_path_evidence(data),
+        "workflow_id": data.get("workflow_id"),
+        "selected_template_id": data.get("selected_template_id")
+        or data.get("template_id"),
+        "surface_decision": surface_decision,
+        "surface_lint": _run_pipeline_surface_lint(
+            data, surface_decision["selected_surface"]
+        ),
+    }
+
+
+def _build_run_pipeline_surface_contract_violation_ext(
+    data: Dict[str, Any],
+) -> List[Dict[str, Any]]:
+    return [
+        {
+            "type": RUN_PIPELINE_SURFACE_CONTRACT_VIOLATION_EXT_TYPE,
+            "data": _run_pipeline_surface_contract_violation_data(data),
         }
     ]
 
@@ -662,7 +824,11 @@ def _build_run_pipeline_ext(parsed_result: Dict[str, Any]) -> Optional[List[Dict
     if not isinstance(data, dict):
         return None
 
-    if _run_pipeline_has_typed_failure(data):
+    surface_decision = _run_pipeline_surface_decision(data)
+    selected_surface = surface_decision["selected_surface"]
+    if selected_surface == "surface_contract_violation":
+        return _build_run_pipeline_surface_contract_violation_ext(data)
+    if selected_surface == "run_pipeline_failure":
         return _build_run_pipeline_failure_ext(data)
 
     selected_workflow = data.get("selected_workflow")
@@ -689,12 +855,21 @@ def _build_run_pipeline_ext(parsed_result: Dict[str, Any]) -> Optional[List[Dict
                 "source": "run_pipeline",
                 "workflow_id": data.get("workflow_id"),
                 "execution_status": data.get("execution_status"),
+                "trace_id": data.get("trace_id"),
                 "prediction_id": data.get("prediction_id"),
                 "run_id": data.get("run_id") or data.get("prediction_id"),
                 "prompt_id": data.get("prompt_id"),
                 "image_paths": image_paths,
+                "dispatch_attempted": data.get("dispatch_attempted"),
+                "dispatch_status": data.get("dispatch_status"),
+                "runtime_path_type": data.get("runtime_path_type"),
+                "closure_eligible": data.get("closure_eligible"),
                 "workflow_data_source": workflow_data_source,
                 "has_generated_image": _run_pipeline_success_ready(data),
+                "surface_decision": surface_decision,
+                "surface_lint": _run_pipeline_surface_lint(
+                    data, surface_decision["selected_surface"]
+                ),
                 "vision_pipeline_status": data.get("vision_pipeline_status"),
             },
         }
@@ -703,7 +878,39 @@ def _build_run_pipeline_ext(parsed_result: Dict[str, Any]) -> Optional[List[Dict
 
 def _run_pipeline_result_failed(parsed_result: Dict[str, Any]) -> bool:
     data = parsed_result.get("data")
-    return isinstance(data, dict) and _run_pipeline_has_typed_failure(data)
+    return (
+        isinstance(data, dict)
+        and _run_pipeline_surface_decision(data)["selected_surface"]
+        == "run_pipeline_failure"
+    )
+
+
+def _run_pipeline_surface_blocks_workflow_update(
+    parsed_result: Dict[str, Any],
+) -> bool:
+    data = parsed_result.get("data")
+    return (
+        isinstance(data, dict)
+        and _run_pipeline_surface_decision(data)["selected_surface"]
+        in {"run_pipeline_failure", "surface_contract_violation"}
+    )
+
+
+def _drop_workflow_mutation_ext(ext: Any) -> Any:
+    mutation_ext_types = {"workflow_update", "param_update", "workflow"}
+    if isinstance(ext, list):
+        filtered_ext = [
+            item
+            for item in ext
+            if not (
+                isinstance(item, dict)
+                and item.get("type") in mutation_ext_types
+            )
+        ]
+        return filtered_ext or None
+    if isinstance(ext, dict) and ext.get("type") in mutation_ext_types:
+        return None
+    return ext
 
 
 def _format_run_pipeline_value(value: Any) -> str:
@@ -712,15 +919,23 @@ def _format_run_pipeline_value(value: Any) -> str:
     return str(value)
 
 
+def _format_run_pipeline_json_value(value: Any) -> str:
+    return json.dumps(value, ensure_ascii=True, sort_keys=True)
+
+
 def _canonical_run_pipeline_success_answer(data: Dict[str, Any]) -> str:
     """Return an evidence-only success answer for run_pipeline results."""
     status = data.get("execution_status") or RUN_PIPELINE_SUCCESS_STATUS
     trace_id = data.get("trace_id")
     run_id = data.get("run_id") or data.get("prediction_id")
     prompt_id = data.get("prompt_id")
+    dispatch_attempted = data.get("dispatch_attempted")
+    dispatch_status = data.get("dispatch_status")
+    runtime_path_type = data.get("runtime_path_type")
     selected_template_id = data.get("selected_template_id") or data.get("template_id")
     workflow_id = data.get("workflow_id")
     image_paths = _run_pipeline_image_paths(data)
+    surface_decision = _run_pipeline_surface_decision(data)
     vision = data.get("vision_analysis")
     if not isinstance(vision, dict):
         vision = {}
@@ -739,6 +954,12 @@ def _canonical_run_pipeline_success_answer(data: Dict[str, Any]) -> str:
         f"- run_id: `{_format_run_pipeline_value(run_id)}`",
         f"- prompt_id: `{_format_run_pipeline_value(prompt_id)}`",
     ]
+    if dispatch_attempted is not None:
+        lines.append(f"- dispatch_attempted: `{_format_run_pipeline_value(dispatch_attempted)}`")
+    if dispatch_status is not None:
+        lines.append(f"- dispatch_status: `{_format_run_pipeline_value(dispatch_status)}`")
+    if runtime_path_type is not None:
+        lines.append(f"- runtime_path_type: `{_format_run_pipeline_value(runtime_path_type)}`")
     if selected_template_id is not None:
         lines.append(
             f"- selected_template_id: `{_format_run_pipeline_value(selected_template_id)}`"
@@ -755,6 +976,17 @@ def _canonical_run_pipeline_success_answer(data: Dict[str, Any]) -> str:
         )
     else:
         lines.append("- vision_overall_score: `not_reported`")
+    lines.append(
+        f"- surface_decision.selected_surface: `{surface_decision['selected_surface']}`"
+    )
+    lines.append(
+        "- surface_decision.matched_success_predicates: "
+        f"`{_format_run_pipeline_json_value(surface_decision['matched_success_predicates'])}`"
+    )
+    lines.append(
+        "- surface_decision.matched_failure_predicates: "
+        f"`{_format_run_pipeline_json_value(surface_decision['matched_failure_predicates'])}`"
+    )
 
     lines.extend(
         [
@@ -770,6 +1002,7 @@ def _canonical_run_pipeline_failure_answer(data: Dict[str, Any]) -> str:
     status = surface.get("execution_status") or "failed"
     stage = surface.get("failed_stage") or "unknown"
     reason = surface.get("failure_reason") or "unknown"
+    trace_id = surface.get("trace_id")
     run_id = surface.get("run_id")
     prompt_id = surface.get("prompt_id")
     image_paths = surface.get("image_paths") or []
@@ -779,11 +1012,14 @@ def _canonical_run_pipeline_failure_answer(data: Dict[str, Any]) -> str:
     closure_blocker_reason = surface.get("closure_blocker_reason")
     closure_eligible = surface.get("closure_eligible")
     retrieval_fail_reason = surface.get("retrieval_fail_reason")
+    surface_decision = surface.get("surface_decision") or {}
+    surface_lint = surface.get("surface_lint") or {}
 
     lines = [
         "### Run Failed Before Image Generation",
         "",
         f"- execution_status: `{status}`",
+        f"- trace_id: `{_format_run_pipeline_value(trace_id)}`",
         f"- failed_stage: `{stage}`",
         f"- failure_reason: `{reason}`",
     ]
@@ -799,6 +1035,21 @@ def _canonical_run_pipeline_failure_answer(data: Dict[str, Any]) -> str:
         lines.append(f"- closure_blocker_reason: `{closure_blocker_reason}`")
     if retrieval_fail_reason is not None:
         lines.append(f"- retrieval_fail_reason: `{retrieval_fail_reason}`")
+    if surface_decision:
+        lines.append(
+            "- surface_decision.selected_surface: "
+            f"`{surface_decision.get('selected_surface')}`"
+        )
+        lines.append(
+            "- surface_decision.matched_success_predicates: "
+            f"`{_format_run_pipeline_json_value(surface_decision.get('matched_success_predicates') or [])}`"
+        )
+        lines.append(
+            "- surface_decision.matched_failure_predicates: "
+            f"`{_format_run_pipeline_json_value(surface_decision.get('matched_failure_predicates') or [])}`"
+        )
+    if surface_lint:
+        lines.append(f"- surface_lint.status: `{surface_lint.get('status')}`")
     lines.extend(
         [
             f"- prompt_id: `{prompt_id}`",
@@ -816,16 +1067,61 @@ def _canonical_run_pipeline_failure_answer(data: Dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
+def _canonical_run_pipeline_surface_contract_violation_answer(
+    data: Dict[str, Any],
+) -> str:
+    surface = _run_pipeline_surface_contract_violation_data(data)
+    surface_decision = surface.get("surface_decision") or {}
+    surface_lint = surface.get("surface_lint") or {}
+    image_paths = surface.get("image_paths") or []
+    lines = [
+        "### Surface Contract Violation",
+        "",
+        f"- execution_status: `{_format_run_pipeline_value(surface.get('execution_status'))}`",
+        f"- trace_id: `{_format_run_pipeline_value(surface.get('trace_id'))}`",
+        f"- run_id: `{_format_run_pipeline_value(surface.get('run_id'))}`",
+        f"- prompt_id: `{_format_run_pipeline_value(surface.get('prompt_id'))}`",
+        f"- dispatch_attempted: `{_format_run_pipeline_value(surface.get('dispatch_attempted'))}`",
+        f"- dispatch_status: `{_format_run_pipeline_value(surface.get('dispatch_status'))}`",
+        f"- runtime_path_type: `{_format_run_pipeline_value(surface.get('runtime_path_type'))}`",
+        f"- image_paths: `{len(image_paths)}`",
+        "- failed_stage: `response_surface_adapter`",
+        "- failure_reason: `surface_classifier_contradiction`",
+        "- surface_decision.selected_surface: "
+        f"`{surface_decision.get('selected_surface')}`",
+        "- surface_decision.matched_success_predicates: "
+        f"`{_format_run_pipeline_json_value(surface_decision.get('matched_success_predicates') or [])}`",
+        "- surface_decision.matched_failure_predicates: "
+        f"`{_format_run_pipeline_json_value(surface_decision.get('matched_failure_predicates') or [])}`",
+        "- surface_decision.contradictions: "
+        f"`{_format_run_pipeline_json_value(surface_decision.get('contradictions') or [])}`",
+        "- surface_decision.first_surface_failure: "
+        f"`{_format_run_pipeline_value(surface_decision.get('first_surface_failure'))}`",
+        f"- surface_lint.status: `{surface_lint.get('status')}`",
+        "",
+        "Generated-image success evidence conflicted with failure evidence, so the normal failure card was rejected.",
+    ]
+    return "\n".join(lines)
+
+
 def _ground_run_pipeline_final_text(
     current_text: str,
     pipeline_result: Dict[str, Any],
 ) -> str:
     """Return the final user-visible text for a run_pipeline result."""
     data = pipeline_result.get("data")
-    if _run_pipeline_result_failed(pipeline_result) and isinstance(data, dict):
-        return _canonical_run_pipeline_failure_answer(data)
-    if isinstance(data, dict) and _run_pipeline_success_ready(data):
+    if not isinstance(data, dict):
+        if not current_text and pipeline_result.get("answer"):
+            return pipeline_result["answer"]
+        return current_text
+
+    selected_surface = _run_pipeline_surface_decision(data)["selected_surface"]
+    if selected_surface == "surface_contract_violation":
+        return _canonical_run_pipeline_surface_contract_violation_answer(data)
+    if _run_pipeline_success_ready(data):
         return _canonical_run_pipeline_success_answer(data)
+    if selected_surface == "run_pipeline_failure":
+        return _canonical_run_pipeline_failure_answer(data)
     if not current_text and pipeline_result.get("answer"):
         return pipeline_result["answer"]
     return current_text
@@ -952,8 +1248,14 @@ def _parse_tool_result_payload(
     if tool_name == "run_pipeline":
         promoted_ext = _build_run_pipeline_ext(result)
         if promoted_ext:
-            result["ext"] = _merge_ext_items(result.get("ext"), promoted_ext)
-            workflow_update_ext = result["ext"]
+            surface_blocks_workflow_update = (
+                _run_pipeline_surface_blocks_workflow_update(result)
+            )
+            existing_ext = result.get("ext")
+            if surface_blocks_workflow_update:
+                existing_ext = _drop_workflow_mutation_ext(existing_ext)
+            result["ext"] = _merge_ext_items(existing_ext, promoted_ext)
+            workflow_update_ext = None if surface_blocks_workflow_update else result["ext"]
             promoted_types = [
                 item.get("type") for item in promoted_ext if isinstance(item, dict)
             ]
@@ -1744,6 +2046,7 @@ You must adhere to the following constraints to complete the task:
             ]
             finished = False  # Default finished state
             run_pipeline_failed = False
+            run_pipeline_blocks_workflow_update = False
 
             if workflow_tools_found:
                 log.info(f"Workflow tools called: {workflow_tools_found}")
@@ -1753,6 +2056,9 @@ You must adhere to the following constraints to complete the task:
                     pipeline_result = tool_results["run_pipeline"]
                     ext = pipeline_result.get("ext")
                     run_pipeline_failed = _run_pipeline_result_failed(pipeline_result)
+                    run_pipeline_blocks_workflow_update = (
+                        _run_pipeline_surface_blocks_workflow_update(pipeline_result)
+                    )
                     current_text = _ground_run_pipeline_final_text(
                         current_text,
                         pipeline_result,
@@ -1798,7 +2104,10 @@ You must adhere to the following constraints to complete the task:
                 finished = True
 
             # Prepare final ext (debug_ext would be empty here since no debug events)
-            suppress_workflow_update_ext = "run_pipeline" in tool_results and run_pipeline_failed
+            suppress_workflow_update_ext = (
+                "run_pipeline" in tool_results
+                and run_pipeline_blocks_workflow_update
+            )
             final_ext = _merge_final_workflow_ext(
                 ext,
                 workflow_update_ext,

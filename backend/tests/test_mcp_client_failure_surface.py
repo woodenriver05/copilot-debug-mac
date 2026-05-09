@@ -276,19 +276,34 @@ def test_failed_run_pipeline_shared_fixture_matrix():
     for case in _failure_surface_cases():
         data = case["data"]
         expected = case["expected"]
+        selected_surface = expected["selected_surface"]
+        decision = mcp_client._run_pipeline_surface_decision(data)
 
-        surface = mcp_client._run_pipeline_failure_surface_data(data)
-        summary = mcp_client._canonical_run_pipeline_failure_answer(data)
-
-        assert surface["failed_stage"] == expected["failed_stage"], case["name"]
-        assert surface["failure_reason"] == expected["failure_reason"], case["name"]
-        assert surface["retrieval_fail_reason"] == expected["retrieval_fail_reason"], case["name"]
-        assert f"failed_stage: `{expected['failed_stage']}`" in summary, case["name"]
-        assert f"failure_reason: `{expected['failure_reason']}`" in summary, case["name"]
-        if expected["retrieval_fail_reason"] is not None:
+        assert decision["selected_surface"] == selected_surface, case["name"]
+        if expected.get("matched_success_predicates") is not None:
             assert (
-                f"retrieval_fail_reason: `{expected['retrieval_fail_reason']}`" in summary
+                decision["matched_success_predicates"]
+                == expected["matched_success_predicates"]
             ), case["name"]
+        if expected.get("matched_failure_predicates") is not None:
+            assert (
+                decision["matched_failure_predicates"]
+                == expected["matched_failure_predicates"]
+            ), case["name"]
+
+        if selected_surface == "run_pipeline_failure":
+            surface = mcp_client._run_pipeline_failure_surface_data(data)
+            summary = mcp_client._canonical_run_pipeline_failure_answer(data)
+
+            assert surface["failed_stage"] == expected["failed_stage"], case["name"]
+            assert surface["failure_reason"] == expected["failure_reason"], case["name"]
+            assert surface["retrieval_fail_reason"] == expected["retrieval_fail_reason"], case["name"]
+            assert f"failed_stage: `{expected['failed_stage']}`" in summary, case["name"]
+            assert f"failure_reason: `{expected['failure_reason']}`" in summary, case["name"]
+            if expected["retrieval_fail_reason"] is not None:
+                assert (
+                    f"retrieval_fail_reason: `{expected['retrieval_fail_reason']}`" in summary
+                ), case["name"]
         if expected.get("detects_direct_data"):
             assert mcp_client._run_pipeline_has_typed_failure(data) is True, case["name"]
         if expected.get("builds_failure_ext"):
@@ -297,6 +312,28 @@ def test_failed_run_pipeline_shared_fixture_matrix():
             assert ext[0]["type"] == "run_pipeline_failure", case["name"]
         if expected.get("no_unknown"):
             assert "unknown" not in summary, case["name"]
+        if expected.get("builds_workflow_update_ext"):
+            assert mcp_client._run_pipeline_has_typed_failure(data) is False, case["name"]
+            assert mcp_client._run_pipeline_result_failed({"data": data}) is False, case["name"]
+            ext = mcp_client._build_run_pipeline_ext({"data": data})
+            assert ext is not None, case["name"]
+            assert ext[0]["type"] == "workflow_update", case["name"]
+            assert ext[0]["data"]["surface_decision"]["selected_surface"] == "workflow_update", case["name"]
+            summary = mcp_client._ground_run_pipeline_final_text("", {"data": data})
+            assert summary.startswith("### Image Generation Complete"), case["name"]
+            assert "Run Failed Before Image Generation" not in summary, case["name"]
+            assert "failed run evidence" not in summary, case["name"]
+        if expected.get("builds_contract_violation_ext"):
+            assert mcp_client._run_pipeline_result_failed({"data": data}) is False, case["name"]
+            ext = mcp_client._build_run_pipeline_ext({"data": data})
+            assert ext is not None, case["name"]
+            assert ext[0]["type"] == "run_pipeline_surface_contract_violation", case["name"]
+            surface = ext[0]["data"]
+            assert surface["failed_stage"] == expected["failed_stage"], case["name"]
+            assert surface["failure_reason"] == expected["failure_reason"], case["name"]
+            summary = mcp_client._ground_run_pipeline_final_text("", {"data": data})
+            assert summary.startswith("### Surface Contract Violation"), case["name"]
+            assert "Run Failed Before Image Generation" not in summary, case["name"]
 
 
 def test_successful_run_pipeline_keeps_workflow_update_surface():
@@ -310,6 +347,35 @@ def test_successful_run_pipeline_keeps_workflow_update_surface():
     assert ext[0]["data"]["image_paths"] == ["output/red-bicycle.png"]
     assert ext[0]["data"]["workflow_data_source"] == "selected_workflow"
     assert ext[0]["data"]["has_generated_image"] is True
+
+
+def test_successful_run_pipeline_runtime_path_type_is_not_failure_evidence():
+    data = next(
+        case["data"]
+        for case in _failure_surface_cases()
+        if case["name"] == "run_175_success_with_runtime_path_type"
+    )
+
+    assert mcp_client._run_pipeline_has_typed_failure(data) is False
+    assert mcp_client._run_pipeline_result_failed({"data": data}) is False
+    assert mcp_client._run_pipeline_success_ready(data) is True
+
+    ext = mcp_client._build_run_pipeline_ext({"data": data})
+    text = mcp_client._ground_run_pipeline_final_text("", {"data": data})
+
+    assert ext
+    assert ext[0]["type"] == "workflow_update"
+    assert ext[0]["data"]["trace_id"] == "trace_526a7f0f7cde"
+    assert ext[0]["data"]["runtime_path_type"] == "canonical_selected_template"
+    assert ext[0]["data"]["surface_decision"]["selected_surface"] == "workflow_update"
+    assert ext[0]["data"]["surface_decision"]["matched_failure_predicates"] == []
+    assert text.startswith("### Image Generation Complete")
+    assert "trace_id: `trace_526a7f0f7cde`" in text
+    assert "dispatch_status: `succeeded`" in text
+    assert "runtime_path_type: `canonical_selected_template`" in text
+    assert "image_paths: `1`" in text
+    assert "Run Failed Before Image Generation" not in text
+    assert "failed run evidence" not in text
 
 
 def test_successful_run_pipeline_recovers_workflow_from_history():
@@ -387,6 +453,39 @@ def test_failed_run_pipeline_ext_suppresses_later_workflow_updates():
     )
 
     assert ext == run_pipeline_ext
+
+
+def test_contract_violation_drops_existing_workflow_update_ext():
+    data = next(
+        case["data"]
+        for case in _failure_surface_cases()
+        if case["name"] == "success_with_failure_reason_becomes_contract_violation"
+    )
+    existing_workflow_update = {
+        "type": "workflow_update",
+        "data": {
+            "source": "run_pipeline",
+            "execution_status": "success",
+            "prompt_id": data["prompt_id"],
+            "image_paths": data["image_paths"],
+            "workflow_data": data["selected_workflow"],
+        },
+    }
+
+    parsed, workflow_update_ext = mcp_client._parse_tool_result_payload(
+        "run_pipeline",
+        {
+            "data": data,
+            "ext": [existing_workflow_update],
+        },
+    )
+
+    assert workflow_update_ext is None
+    assert parsed["ext"]
+    assert [item["type"] for item in parsed["ext"]] == [
+        "run_pipeline_surface_contract_violation"
+    ]
+    assert mcp_client._run_pipeline_surface_blocks_workflow_update(parsed) is True
 
 
 def test_successful_run_pipeline_ext_keeps_workflow_updates():

@@ -16,6 +16,7 @@
         "run_id": 148
       },
       "expected": {
+        "selected_surface": "run_pipeline_failure",
         "failed_stage": "search",
         "failure_reason": "no_execution_ready_workflow",
         "retrieval_fail_reason": null,
@@ -39,6 +40,7 @@
         "image_paths": []
       },
       "expected": {
+        "selected_surface": "run_pipeline_failure",
         "failed_stage": "search",
         "failure_reason": "no_execution_ready_workflow",
         "retrieval_fail_reason": "no_execution_ready_workflow",
@@ -59,6 +61,7 @@
         "run_id": "run-skipped"
       },
       "expected": {
+        "selected_surface": "run_pipeline_failure",
         "failed_stage": "search",
         "failure_reason": "no_execution_ready_workflow",
         "retrieval_fail_reason": "no_execution_ready_workflow",
@@ -82,6 +85,7 @@
         "run_id": "run-conflict"
       },
       "expected": {
+        "selected_surface": "run_pipeline_failure",
         "failed_stage": "search",
         "failure_reason": "no_execution_ready_workflow",
         "retrieval_fail_reason": "no_execution_ready_workflow",
@@ -100,12 +104,141 @@
         "image_paths": []
       },
       "expected": {
+        "selected_surface": "run_pipeline_failure",
         "failed_stage": "search",
         "failure_reason": "no_execution_ready_workflow",
         "retrieval_fail_reason": "no_execution_ready_workflow",
         "detects_direct_data": true,
         "builds_failure_ext": true,
         "no_unknown": true
+      }
+    },
+    {
+      "name": "run_175_success_with_runtime_path_type",
+      "data": {
+        "selected_workflow": {
+          "nodes": [
+            {
+              "id": 1,
+              "type": "SaveImage",
+              "inputs": {
+                "filename_prefix": "sanitized-run-175"
+              }
+            }
+          ]
+        },
+        "workflow_id": "0819a661-0c21-4d2e-8e04-d2c93f9acf53",
+        "selected_template_id": "workflow:0819a661-0c21-4d2e-8e04-d2c93f9acf53",
+        "execution_status": "success",
+        "dispatch_attempted": true,
+        "dispatch_status": "succeeded",
+        "runtime_path_type": "canonical_selected_template",
+        "closure_eligible": true,
+        "prompt_id": "6de20153-4b84-44b8-a2fb-17e8f0bbf6c8",
+        "image_paths": [
+          "output/sanitized-run-175.png"
+        ],
+        "trace_id": "trace_526a7f0f7cde",
+        "run_id": 175
+      },
+      "expected": {
+        "selected_surface": "workflow_update",
+        "detects_direct_data": false,
+        "builds_failure_ext": false,
+        "builds_workflow_update_ext": true,
+        "no_failure_card": true,
+        "matched_success_predicates": [
+          "execution_status_success",
+          "prompt_id_present",
+          "image_paths_nonempty"
+        ],
+        "matched_failure_predicates": []
+      }
+    },
+    {
+      "name": "success_with_empty_typed_failure_metadata",
+      "data": {
+        "selected_workflow": {
+          "nodes": [
+            {
+              "id": 1,
+              "type": "SaveImage",
+              "inputs": {
+                "filename_prefix": "empty-typed-failure"
+              }
+            }
+          ]
+        },
+        "execution_status": "success",
+        "typed_failure": {},
+        "dispatch_attempted": true,
+        "dispatch_status": "succeeded",
+        "runtime_path_type": "canonical_selected_template",
+        "prompt_id": "prompt-empty-typed-failure",
+        "image_paths": [
+          "output/empty-typed-failure.png"
+        ],
+        "trace_id": "trace-empty-typed-failure",
+        "run_id": "run-empty-typed-failure"
+      },
+      "expected": {
+        "selected_surface": "workflow_update",
+        "detects_direct_data": false,
+        "builds_failure_ext": false,
+        "builds_workflow_update_ext": true,
+        "no_failure_card": true,
+        "matched_success_predicates": [
+          "execution_status_success",
+          "prompt_id_present",
+          "image_paths_nonempty"
+        ],
+        "matched_failure_predicates": []
+      }
+    },
+    {
+      "name": "success_with_failure_reason_becomes_contract_violation",
+      "data": {
+        "selected_workflow": {
+          "nodes": [
+            {
+              "id": 1,
+              "type": "SaveImage",
+              "inputs": {
+                "filename_prefix": "sanitized-contradiction"
+              }
+            }
+          ]
+        },
+        "execution_status": "success",
+        "failed_stage": "unknown",
+        "failure_reason": "unknown",
+        "dispatch_attempted": true,
+        "dispatch_status": "succeeded",
+        "runtime_path_type": "canonical_selected_template",
+        "prompt_id": "prompt-contradiction",
+        "image_paths": [
+          "output/sanitized-contradiction.png"
+        ],
+        "trace_id": "trace-contradiction",
+        "run_id": "run-contradiction"
+      },
+      "expected": {
+        "selected_surface": "surface_contract_violation",
+        "failed_stage": "response_surface_adapter",
+        "failure_reason": "surface_classifier_contradiction",
+        "detects_direct_data": false,
+        "builds_failure_ext": false,
+        "builds_contract_violation_ext": true,
+        "no_failure_card": true,
+        "matched_success_predicates": [
+          "execution_status_success",
+          "prompt_id_present",
+          "image_paths_nonempty"
+        ],
+        "matched_failure_predicates": [
+          "failed_stage_present",
+          "failure_reason_present"
+        ]
       }
     }
   ]

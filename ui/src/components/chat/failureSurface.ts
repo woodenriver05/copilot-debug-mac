@@ -8,7 +8,8 @@ type SurfaceTone = "success" | "failure" | "neutral";
 declare const __COPILOT_FAILURE_SURFACE_BUILD_ID__: string | undefined;
 
 export const FAILURE_SURFACE_SCHEMA_VERSION = "run-pipeline-failure-surface-v2";
-const FALLBACK_FAILURE_SURFACE_FORMATTER_BUILD_ID = "20260508-retrieval-fallback-v3";
+const FALLBACK_FAILURE_SURFACE_FORMATTER_BUILD_ID = "20260508-surface-decision-v4";
+const SURFACE_DECISION_SCHEMA_VERSION = "run-pipeline-surface-decision-v1";
 
 function getFailureSurfaceFormatterBuildId(): string {
   if (
@@ -53,6 +54,7 @@ export type RunPipelineFailureDebugSummary = {
 };
 
 const RUN_PIPELINE_FAILURE_EXT_TYPE = "run_pipeline_failure";
+const RUN_PIPELINE_SURFACE_CONTRACT_VIOLATION_EXT_TYPE = "run_pipeline_surface_contract_violation";
 const RUN_PIPELINE_SUCCESS_STATUS = "success";
 
 const FORBIDDEN_RECOVERY_TOKENS = [
@@ -74,22 +76,75 @@ export function hasGeneratedImageEvidence(data: any): boolean {
   return Boolean(data?.prompt_id) && Array.isArray(data?.image_paths) && data.image_paths.length > 0;
 }
 
-export function isFailedRunPipelineData(data: any): boolean {
+export function hasGeneratedImageSuccess(data: any): boolean {
+  return data?.execution_status === RUN_PIPELINE_SUCCESS_STATUS && hasGeneratedImageEvidence(data);
+}
+
+function getRuntimePathEvidence(data: any): any {
+  return data?.runtime_path_evidence && typeof data.runtime_path_evidence === "object" ? data.runtime_path_evidence : {};
+}
+
+function getMatchedSuccessPredicates(data: any): string[] {
+  const predicates: string[] = [];
+  if (data?.execution_status === RUN_PIPELINE_SUCCESS_STATUS) {
+    predicates.push("execution_status_success");
+  }
+  if (data?.prompt_id) {
+    predicates.push("prompt_id_present");
+  }
+  if (Array.isArray(data?.image_paths) && data.image_paths.length > 0) {
+    predicates.push("image_paths_nonempty");
+  }
+  return predicates;
+}
+
+function getMatchedFailurePredicates(data: any): string[] {
   const executionStatus = data?.execution_status;
-  const runtimeEvidence =
-    data?.runtime_path_evidence && typeof data.runtime_path_evidence === "object" ? data.runtime_path_evidence : {};
-  const hasFailureEvidence = Boolean(
-    data?.failed_stage ||
-      data?.failure_reason ||
-      data?.typed_failure ||
-      data?.retrieval_fail_reason ||
-      data?.runtime_path_type ||
-      data?.closure_blocker_reason ||
-      runtimeEvidence.retrieval_fail_reason
-  );
+  const runtimeEvidence = getRuntimePathEvidence(data);
+  const predicates: string[] = [];
+  if (executionStatus && executionStatus !== RUN_PIPELINE_SUCCESS_STATUS) {
+    predicates.push("execution_status_non_success");
+  }
+  if (data?.failed_stage) {
+    predicates.push("failed_stage_present");
+  }
+  if (data?.failure_reason) {
+    predicates.push("failure_reason_present");
+  }
+  if (hasTypedFailureEvidence(data?.typed_failure)) {
+    predicates.push("typed_failure_present");
+  }
+  if (data?.retrieval_fail_reason) {
+    predicates.push("retrieval_fail_reason_present");
+  }
+  if (data?.closure_blocker_reason) {
+    predicates.push("closure_blocker_reason_present");
+  }
+  if (runtimeEvidence.retrieval_fail_reason) {
+    predicates.push("runtime_path_evidence_retrieval_fail_reason_present");
+  }
+  return predicates;
+}
+
+function hasTypedFailureEvidence(typedFailure: any): boolean {
+  if (!typedFailure) {
+    return false;
+  }
+  if (typeof typedFailure === "object") {
+    return Object.keys(typedFailure).length > 0;
+  }
+  return true;
+}
+
+function hasFailureEvidence(data: any): boolean {
+  return getMatchedFailurePredicates(data).length > 0;
+}
+
+export function isFailedRunPipelineData(data: any): boolean {
   return Boolean(
     data?.source === "run_pipeline" &&
-      ((executionStatus && executionStatus !== RUN_PIPELINE_SUCCESS_STATUS) || hasFailureEvidence)
+      !hasGeneratedImageSuccess(data) &&
+      hasFailureEvidence(data)
   );
 }
 
@@ -97,11 +152,70 @@ export function isRunPipelineFailureExt(item: ExtItem | undefined): boolean {
   if (!item) {
     return false;
   }
-  return item.type === RUN_PIPELINE_FAILURE_EXT_TYPE || isFailedRunPipelineData(item.data);
+  if (item.type === RUN_PIPELINE_FAILURE_EXT_TYPE) {
+    return !hasGeneratedImageSuccess(item.data);
+  }
+  return isFailedRunPipelineData(item.data);
 }
 
 export function findRunPipelineFailureExt(response: any): ExtItem | undefined {
   return getExtItems(response).find(isRunPipelineFailureExt);
+}
+
+export function getRunPipelineSurfaceDecision(data: any): any {
+  const matchedSuccessPredicates = getMatchedSuccessPredicates(data);
+  const matchedFailurePredicates = getMatchedFailurePredicates(data);
+  const generatedImageSuccess = hasGeneratedImageSuccess(data);
+  const contradictions: string[] = [];
+  let selectedSurface = "text_only";
+  let firstSurfaceFailure: string | null = null;
+
+  if (generatedImageSuccess && matchedFailurePredicates.length > 0) {
+    selectedSurface = "surface_contract_violation";
+    firstSurfaceFailure = "response_formatter";
+    contradictions.push("failure_evidence_with_generated_image_success");
+    if (
+      (data?.failed_stage === undefined || data?.failed_stage === null || data?.failed_stage === "unknown") &&
+      (data?.failure_reason === undefined || data?.failure_reason === null || data?.failure_reason === "unknown")
+    ) {
+      contradictions.push("unknown_failure_surface_with_generated_image_success");
+    }
+  } else if (generatedImageSuccess) {
+    selectedSurface = "workflow_update";
+  } else if (matchedFailurePredicates.length > 0) {
+    selectedSurface = "run_pipeline_failure";
+  }
+
+  return {
+    schema_version: SURFACE_DECISION_SCHEMA_VERSION,
+    selected_surface: selectedSurface,
+    selected_by: "run_pipeline_surface_classifier",
+    matched_success_predicates: matchedSuccessPredicates,
+    matched_failure_predicates: matchedFailurePredicates,
+    contradictions,
+    first_surface_failure: firstSurfaceFailure,
+  };
+}
+
+function isRunPipelineSurfaceContractViolationExt(item: ExtItem | undefined): boolean {
+  if (!item) {
+    return false;
+  }
+  if (item.type === RUN_PIPELINE_SURFACE_CONTRACT_VIOLATION_EXT_TYPE) {
+    return true;
+  }
+  if (item.type === RUN_PIPELINE_FAILURE_EXT_TYPE && hasGeneratedImageSuccess(item.data)) {
+    return true;
+  }
+  return getRunPipelineSurfaceDecision(item.data).selected_surface === "surface_contract_violation";
+}
+
+export function findRunPipelineSurfaceContractViolationExt(response: any): ExtItem | undefined {
+  return getExtItems(response).find(isRunPipelineSurfaceContractViolationExt);
+}
+
+export function hasRunPipelineSurfaceContractViolation(response: any): boolean {
+  return Boolean(findRunPipelineSurfaceContractViolationExt(response));
 }
 
 export function shouldApplyWorkflowUpdate(item: ExtItem | undefined): boolean {
@@ -118,8 +232,15 @@ export function shouldApplyWorkflowUpdate(item: ExtItem | undefined): boolean {
   return data.execution_status === RUN_PIPELINE_SUCCESS_STATUS && hasGeneratedImageEvidence(data);
 }
 
+export function shouldApplyWorkflowUpdateForResponse(response: any, item?: ExtItem): boolean {
+  if (hasRunPipelineSurfaceContractViolation(response)) {
+    return false;
+  }
+  return shouldApplyWorkflowUpdate(item || findExtItem(response, "workflow_update"));
+}
+
 export function hasSuccessfulWorkflowUpdate(response: any): boolean {
-  return shouldApplyWorkflowUpdate(findExtItem(response, "workflow_update"));
+  return shouldApplyWorkflowUpdateForResponse(response);
 }
 
 export function hasForbiddenRecoveryText(text: string): boolean {
@@ -160,7 +281,6 @@ function getRunPipelineFailureData(responseOrData: any): { extType: string | nul
     responseOrData?.failed_stage ||
     responseOrData?.failure_reason ||
     responseOrData?.retrieval_fail_reason ||
-    responseOrData?.runtime_path_type ||
     responseOrData?.closure_blocker_reason ||
     (responseOrData?.runtime_path_evidence &&
       typeof responseOrData.runtime_path_evidence === "object" &&
@@ -183,8 +303,7 @@ export function getRunPipelineFailureDebugSummary(responseOrData: any): RunPipel
   const data = failureData.data;
   const imagePaths = Array.isArray(data?.image_paths) ? data.image_paths : [];
   const typedFailure = data?.typed_failure && typeof data.typed_failure === "object" ? data.typed_failure : {};
-  const runtimeEvidence =
-    data?.runtime_path_evidence && typeof data.runtime_path_evidence === "object" ? data.runtime_path_evidence : {};
+  const runtimeEvidence = getRuntimePathEvidence(data);
   const stageFromRuntimePath = getStageFromRuntimePathType(data?.runtime_path_type);
   const topLevelRetrievalFailReason = data?.retrieval_fail_reason ?? null;
   const runtimeRetrievalFailReason = runtimeEvidence.retrieval_fail_reason ?? null;
@@ -227,10 +346,12 @@ export function buildRunPipelineFailureMarkdown(data: any): string {
   const runId = data?.run_id ?? data?.prediction_id ?? null;
   const promptId = data?.prompt_id ?? null;
   const imagePaths = Array.isArray(data?.image_paths) ? data.image_paths : [];
+  const surfaceDecision = getRunPipelineSurfaceDecision(data);
   const lines = [
     "### Run Failed Before Image Generation",
     "",
     `- execution_status: \`${data?.execution_status || "failed"}\``,
+    `- trace_id: \`${data?.trace_id ?? null}\``,
     `- failed_stage: \`${summary?.failed_stage || "unknown"}\``,
     `- failure_reason: \`${summary?.failure_reason || "unknown"}\``,
     `- surface_schema_version: \`${FAILURE_SURFACE_SCHEMA_VERSION}\``,
@@ -255,6 +376,13 @@ export function buildRunPipelineFailureMarkdown(data: any): string {
   if (summary?.retrieval_fail_reason !== undefined && summary?.retrieval_fail_reason !== null) {
     lines.push(`- retrieval_fail_reason: \`${summary.retrieval_fail_reason}\``);
   }
+  lines.push(`- surface_decision.selected_surface: \`${surfaceDecision.selected_surface}\``);
+  lines.push(
+    `- surface_decision.matched_success_predicates: \`${JSON.stringify(surfaceDecision.matched_success_predicates)}\``,
+  );
+  lines.push(
+    `- surface_decision.matched_failure_predicates: \`${JSON.stringify(surfaceDecision.matched_failure_predicates)}\``,
+  );
 
   lines.push(`- prompt_id: \`${promptId}\``);
   lines.push(`- image_paths: \`${imagePaths.length}\``);
@@ -268,7 +396,49 @@ export function buildRunPipelineFailureMarkdown(data: any): string {
   return lines.join("\n");
 }
 
+export function buildRunPipelineSurfaceContractViolationMarkdown(data: any): string {
+  const decision = data?.surface_decision || getRunPipelineSurfaceDecision(data);
+  const imagePaths = Array.isArray(data?.image_paths) ? data.image_paths : [];
+  const lines = [
+    "### Surface Contract Violation",
+    "",
+    `- execution_status: \`${data?.execution_status ?? null}\``,
+    `- trace_id: \`${data?.trace_id ?? null}\``,
+    `- run_id: \`${data?.run_id ?? data?.prediction_id ?? null}\``,
+    `- prompt_id: \`${data?.prompt_id ?? null}\``,
+    `- dispatch_attempted: \`${data?.dispatch_attempted ?? null}\``,
+    `- dispatch_status: \`${data?.dispatch_status ?? null}\``,
+    `- runtime_path_type: \`${data?.runtime_path_type ?? null}\``,
+    `- image_paths: \`${imagePaths.length}\``,
+    "- failed_stage: `response_surface_adapter`",
+    "- failure_reason: `surface_classifier_contradiction`",
+    `- surface_decision.selected_surface: \`${decision.selected_surface}\``,
+    `- surface_decision.matched_success_predicates: \`${JSON.stringify(decision.matched_success_predicates || [])}\``,
+    `- surface_decision.matched_failure_predicates: \`${JSON.stringify(decision.matched_failure_predicates || [])}\``,
+    `- surface_decision.contradictions: \`${JSON.stringify(decision.contradictions || [])}\``,
+    `- surface_decision.first_surface_failure: \`${decision.first_surface_failure ?? null}\``,
+    "",
+    "Generated-image success evidence conflicted with failure evidence, so the normal failure card was rejected.",
+  ];
+  return lines.join("\n");
+}
+
 export function getDebugResultSurface(response: any): DebugResultSurface {
+  const contractViolationExt = findRunPipelineSurfaceContractViolationExt(response);
+  if (contractViolationExt) {
+    return {
+      title: "Surface Contract Violation",
+      tone: "failure",
+      isWorkflowUpdate: false,
+      isSuccessfulWorkflowUpdate: false,
+      helpText: null,
+      response: {
+        ...(response || {}),
+        text: buildRunPipelineSurfaceContractViolationMarkdown(contractViolationExt.data || {}),
+      },
+    };
+  }
+
   const failureExt = findRunPipelineFailureExt(response);
   if (failureExt) {
     return {

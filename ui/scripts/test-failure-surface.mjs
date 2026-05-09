@@ -25,7 +25,7 @@ const sandbox = {
 vm.runInNewContext(compiled, sandbox, { filename: helperPath });
 
 const helpers = sandbox.module.exports;
-assert.equal(helpers.FAILURE_SURFACE_FORMATTER_BUILD_ID, "20260508-retrieval-fallback-v3");
+assert.equal(helpers.FAILURE_SURFACE_FORMATTER_BUILD_ID, "20260508-surface-decision-v4");
 
 const injectedBuildExportsObject = {};
 const injectedBuildSandbox = {
@@ -137,7 +137,7 @@ const typedFailureOnlySurface = helpers.getDebugResultSurface({
 assert.match(typedFailureOnlySurface.response.text, /failed_stage: `search`/);
 assert.match(typedFailureOnlySurface.response.text, /failure_reason: `no_execution_ready_workflow`/);
 assert.match(typedFailureOnlySurface.response.text, /surface_schema_version: `run-pipeline-failure-surface-v2`/);
-assert.match(typedFailureOnlySurface.response.text, /formatter_build_id: `20260508-retrieval-fallback-v3`/);
+assert.match(typedFailureOnlySurface.response.text, /formatter_build_id: `20260508-surface-decision-v4`/);
 assert.doesNotMatch(typedFailureOnlySurface.response.text, /unknown/);
 
 const typedFailureSummary = helpers.getRunPipelineFailureDebugSummary({
@@ -165,7 +165,7 @@ const typedFailureSummary = helpers.getRunPipelineFailureDebugSummary({
 assert.equal(typedFailureSummary.failed_stage, "search");
 assert.equal(typedFailureSummary.failure_reason, "no_execution_ready_workflow");
 assert.equal(typedFailureSummary.surface_schema_version, "run-pipeline-failure-surface-v2");
-assert.equal(typedFailureSummary.formatter_build_id, "20260508-retrieval-fallback-v3");
+assert.equal(typedFailureSummary.formatter_build_id, "20260508-surface-decision-v4");
 
 const runtimePathOnlySurface = helpers.getDebugResultSurface({
   text: "no image",
@@ -220,30 +220,65 @@ assert.match(topLevelRetrievalOnlySurface.response.text, /retrieval_fail_reason:
 assert.doesNotMatch(topLevelRetrievalOnlySurface.response.text, /unknown/);
 
 for (const fixtureCase of fixtureCases) {
+  const expected = fixtureCase.expected;
+  const extType = expected.selected_surface === "workflow_update" ? "workflow_update" : "run_pipeline_failure";
   const response = {
     text: "no image",
-    ext: [{ type: "run_pipeline_failure", data: fixtureCase.data }],
+    ext: [{ type: extType, data: fixtureCase.data }],
   };
   const summary = helpers.getRunPipelineFailureDebugSummary(response);
   const surface = helpers.getDebugResultSurface(response);
-  const expected = fixtureCase.expected;
+  const decision = helpers.getRunPipelineSurfaceDecision(fixtureCase.data);
 
-  assert.equal(summary.failed_stage, expected.failed_stage, fixtureCase.name);
-  assert.equal(summary.failure_reason, expected.failure_reason, fixtureCase.name);
-  assert.equal(summary.retrieval_fail_reason, expected.retrieval_fail_reason, fixtureCase.name);
-  assert.ok(surface.response.text.includes(`failed_stage: \`${expected.failed_stage}\``), fixtureCase.name);
-  assert.ok(surface.response.text.includes(`failure_reason: \`${expected.failure_reason}\``), fixtureCase.name);
-  if (expected.retrieval_fail_reason !== null) {
-    assert.ok(
-      surface.response.text.includes(`retrieval_fail_reason: \`${expected.retrieval_fail_reason}\``),
+  assert.equal(decision.selected_surface, expected.selected_surface, fixtureCase.name);
+  if (expected.matched_success_predicates) {
+    assert.equal(
+      JSON.stringify(decision.matched_success_predicates),
+      JSON.stringify(expected.matched_success_predicates),
       fixtureCase.name,
     );
   }
-  if (expected.detects_direct_data) {
-    assert.notEqual(helpers.getRunPipelineFailureDebugSummary(fixtureCase.data), null, fixtureCase.name);
+  if (expected.matched_failure_predicates) {
+    assert.equal(
+      JSON.stringify(decision.matched_failure_predicates),
+      JSON.stringify(expected.matched_failure_predicates),
+      fixtureCase.name,
+    );
   }
-  if (expected.no_unknown) {
-    assert.doesNotMatch(surface.response.text, /unknown/, fixtureCase.name);
+
+  if (expected.selected_surface === "run_pipeline_failure") {
+    assert.equal(summary.failed_stage, expected.failed_stage, fixtureCase.name);
+    assert.equal(summary.failure_reason, expected.failure_reason, fixtureCase.name);
+    assert.equal(summary.retrieval_fail_reason, expected.retrieval_fail_reason, fixtureCase.name);
+    assert.ok(surface.response.text.includes(`failed_stage: \`${expected.failed_stage}\``), fixtureCase.name);
+    assert.ok(surface.response.text.includes(`failure_reason: \`${expected.failure_reason}\``), fixtureCase.name);
+    if (expected.retrieval_fail_reason !== null) {
+      assert.ok(
+        surface.response.text.includes(`retrieval_fail_reason: \`${expected.retrieval_fail_reason}\``),
+        fixtureCase.name,
+      );
+    }
+    if (expected.detects_direct_data) {
+      assert.notEqual(helpers.getRunPipelineFailureDebugSummary(fixtureCase.data), null, fixtureCase.name);
+    }
+    if (expected.no_unknown) {
+      assert.doesNotMatch(surface.response.text, /unknown/, fixtureCase.name);
+    }
+  }
+
+  if (expected.selected_surface === "workflow_update") {
+    assert.equal(summary, null, fixtureCase.name);
+    assert.equal(surface.title, "Workflow Updated Successfully", fixtureCase.name);
+    assert.equal(surface.isSuccessfulWorkflowUpdate, true, fixtureCase.name);
+    assert.equal(helpers.isFailedRunPipelineData(fixtureCase.data), false, fixtureCase.name);
+    assert.equal(helpers.findRunPipelineFailureExt(response), undefined, fixtureCase.name);
+  }
+
+  if (expected.selected_surface === "surface_contract_violation") {
+    assert.equal(surface.title, "Surface Contract Violation", fixtureCase.name);
+    assert.match(surface.response.text, /failed_stage: `response_surface_adapter`/, fixtureCase.name);
+    assert.match(surface.response.text, /failure_reason: `surface_classifier_contradiction`/, fixtureCase.name);
+    assert.doesNotMatch(surface.response.text, /Run Failed Before Image Generation/, fixtureCase.name);
   }
 }
 
@@ -252,6 +287,10 @@ const successWorkflowUpdate = {
   data: {
     source: "run_pipeline",
     execution_status: "success",
+    trace_id: "trace-ok",
+    dispatch_attempted: true,
+    dispatch_status: "succeeded",
+    runtime_path_type: "canonical_selected_template",
     prompt_id: "prompt-123",
     image_paths: ["output/red-bicycle.png"],
     prediction_id: 61,
@@ -266,6 +305,7 @@ assert.equal(helpers.shouldApplyWorkflowUpdate(successWorkflowUpdate), true);
 assert.equal(successSurface.title, "Workflow Updated Successfully");
 assert.equal(successSurface.tone, "success");
 assert.equal(successSurface.isSuccessfulWorkflowUpdate, true);
+assert.equal(helpers.isFailedRunPipelineData(successWorkflowUpdate.data), false);
 
 const cachedRawFailureMessages = storageHelpers.sanitizeFailureSurfaceCacheMessages([
   {
@@ -307,11 +347,11 @@ assert.equal(
 );
 assert.equal(
   cachedRawFailureMessages[0].metadata.cache_writer_failure_surface_formatter_build_id,
-  "20260508-retrieval-fallback-v3",
+  "20260508-surface-decision-v4",
 );
 assert.equal(
   cachedRawFailureMessages[0].metadata.failure_surface_generated_formatter_build_id,
-  "20260508-retrieval-fallback-v3",
+  "20260508-surface-decision-v4",
 );
 assert.equal(cachedRawFailureMessages[0].metadata.failure_surface_formatter_build_id, undefined);
 
@@ -381,7 +421,7 @@ assert.equal(
 );
 assert.equal(
   staleRenderedFailureMessages[0].metadata.failure_surface_generated_formatter_build_id,
-  "20260508-retrieval-fallback-v3",
+  "20260508-surface-decision-v4",
 );
 
 const staleJsonUnknownMessages = storageHelpers.sanitizeFailureSurfaceCacheMessages([
@@ -396,7 +436,7 @@ const staleJsonUnknownMessages = storageHelpers.sanitizeFailureSurfaceCacheMessa
     }),
     metadata: {
       copilot_cache_schema_version: "copilot-message-cache-v3",
-      cache_writer_failure_surface_formatter_build_id: "20260508-retrieval-fallback-v3",
+      cache_writer_failure_surface_formatter_build_id: "20260508-surface-decision-v4",
     },
     finished: true,
   },
@@ -408,7 +448,7 @@ assert.equal(staleJsonUnknownResponse.failure_reason, undefined);
 assert.equal(staleJsonUnknownMessages[0].metadata.stale_failure_surface_invalidated, true);
 assert.equal(
   staleJsonUnknownMessages[0].metadata.failure_surface_generated_formatter_build_id,
-  "20260508-retrieval-fallback-v3",
+  "20260508-surface-decision-v4",
 );
 
 const localStorageWrites = new Map();
