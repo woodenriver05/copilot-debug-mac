@@ -369,6 +369,8 @@ def test_successful_run_pipeline_runtime_path_type_is_not_failure_evidence():
     assert ext[0]["data"]["runtime_path_type"] == "canonical_selected_template"
     assert ext[0]["data"]["surface_decision"]["selected_surface"] == "workflow_update"
     assert ext[0]["data"]["surface_decision"]["matched_failure_predicates"] == []
+    assert ext[0]["data"]["surface_lint"]["status"] == "ok"
+    assert ext[0]["data"]["surface_lint"]["warnings"] == []
     assert text.startswith("### Image Generation Complete")
     assert "trace_id: `trace_526a7f0f7cde`" in text
     assert "dispatch_status: `succeeded`" in text

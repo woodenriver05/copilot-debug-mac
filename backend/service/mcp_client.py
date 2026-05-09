@@ -611,9 +611,6 @@ def _run_pipeline_surface_lint(
         violations.append("failure_surface_unknown_stage_and_reason")
     if image_paths and selected_surface == "run_pipeline_failure":
         violations.append("no_image_failure_text_conflicts_with_image_paths_nonempty")
-    if data.get("runtime_path_type") and not _run_pipeline_has_failure_evidence(data):
-        warnings.append("runtime_path_type_is_route_metadata_not_failure_evidence")
-
     if violations:
         status = "contract_violation"
     elif warnings:
