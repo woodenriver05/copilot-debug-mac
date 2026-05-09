@@ -221,7 +221,12 @@ assert.doesNotMatch(topLevelRetrievalOnlySurface.response.text, /unknown/);
 
 for (const fixtureCase of fixtureCases) {
   const expected = fixtureCase.expected;
-  const extType = expected.selected_surface === "workflow_update" ? "workflow_update" : "run_pipeline_failure";
+  const extType =
+    expected.selected_surface === "workflow_update"
+      ? "workflow_update"
+      : expected.selected_surface === "surface_contract_violation"
+        ? "run_pipeline_surface_contract_violation"
+        : "run_pipeline_failure";
   const response = {
     text: "no image",
     ext: [{ type: extType, data: fixtureCase.data }],
@@ -275,12 +280,47 @@ for (const fixtureCase of fixtureCases) {
   }
 
   if (expected.selected_surface === "surface_contract_violation") {
+    assert.notEqual(helpers.findRunPipelineSurfaceContractViolationExt(response), undefined, fixtureCase.name);
     assert.equal(surface.title, "Surface Contract Violation", fixtureCase.name);
     assert.match(surface.response.text, /failed_stage: `response_surface_adapter`/, fixtureCase.name);
     assert.match(surface.response.text, /failure_reason: `surface_classifier_contradiction`/, fixtureCase.name);
     assert.doesNotMatch(surface.response.text, /Run Failed Before Image Generation/, fixtureCase.name);
   }
 }
+
+const contractViolationFixture = fixtureCases.find(
+  (fixtureCase) => fixtureCase.name === "success_with_failure_reason_becomes_contract_violation",
+);
+assert.ok(contractViolationFixture);
+const workflowUpdateWithContractViolation = {
+  text: "contradictory run_pipeline result",
+  ext: [
+    {
+      type: "workflow_update",
+      data: {
+        source: "run_pipeline",
+        execution_status: "success",
+        prompt_id: contractViolationFixture.data.prompt_id,
+        image_paths: contractViolationFixture.data.image_paths,
+        workflow_data: contractViolationFixture.data.selected_workflow,
+      },
+    },
+    {
+      type: "run_pipeline_surface_contract_violation",
+      data: contractViolationFixture.data,
+    },
+  ],
+};
+assert.equal(helpers.shouldApplyWorkflowUpdate(workflowUpdateWithContractViolation.ext[0]), true);
+assert.equal(
+  helpers.shouldApplyWorkflowUpdateForResponse(
+    workflowUpdateWithContractViolation,
+    workflowUpdateWithContractViolation.ext[0],
+  ),
+  false,
+);
+assert.equal(helpers.hasSuccessfulWorkflowUpdate(workflowUpdateWithContractViolation), false);
+assert.equal(helpers.getDebugResultSurface(workflowUpdateWithContractViolation).title, "Surface Contract Violation");
 
 const successWorkflowUpdate = {
   type: "workflow_update",

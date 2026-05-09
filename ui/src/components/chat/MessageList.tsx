@@ -11,7 +11,11 @@ import { lazy, Suspense, useEffect, useLayoutEffect, useMemo, useRef, useState }
 import Showcase from "./messages/Showcase";
 import { useChatContext } from "../../context/ChatContext";
 import { mergeByKeyCombine } from "../../utils/tools";
-import { findRunPipelineFailureExt, shouldApplyWorkflowUpdate } from "./failureSurface";
+import {
+    findRunPipelineFailureExt,
+    findRunPipelineSurfaceContractViolationExt,
+    shouldApplyWorkflowUpdateForResponse,
+} from "./failureSurface";
 
 // Define types for ext items to avoid implicit any
 interface ExtItem {
@@ -260,12 +264,17 @@ export function MessageList({ messages, latestInput, onOptionClick, installedNod
                 const debugCheckpointExt = response.ext?.find((item: ExtItem) => item.type === 'debug_checkpoint');
                 const workflowUpdateCompleteExt = response.ext?.find((item: ExtItem) => item.type === 'workflow_update_complete');
                 const runPipelineFailureExt = findRunPipelineFailureExt(response);
+                const runPipelineSurfaceContractViolationExt = findRunPipelineSurfaceContractViolationExt(response);
                 
                 // 检查是否是工作流成功加载的消息
                 const isWorkflowSuccessMessage = response.text === 'The workflow has been successfully loaded to the canvas';
 
                 // 处理工作流更新：实时更新画布
-                if (workflowUpdateExt && workflowUpdateExt.data && shouldApplyWorkflowUpdate(workflowUpdateExt)) {
+                if (
+                    workflowUpdateExt &&
+                    workflowUpdateExt.data &&
+                    shouldApplyWorkflowUpdateForResponse(response, workflowUpdateExt)
+                ) {
                     const { workflow_data } = workflowUpdateExt.data;
                     if (typeof window !== 'undefined' && (window as any).app && workflow_data) {
                         // 使用更具体的key，包含workflow_data的hash以检测实际内容变化
@@ -308,7 +317,7 @@ export function MessageList({ messages, latestInput, onOptionClick, installedNod
                         }
                     }
                 } else if (workflowUpdateExt && workflowUpdateExt.data) {
-                    console.warn('[MessageList] Suppressed workflow update because run_pipeline did not provide successful execution evidence');
+                    console.warn('[MessageList] Suppressed workflow update because run_pipeline did not provide an uncontradicted success surface');
                 }
 
                 
@@ -653,7 +662,7 @@ export function MessageList({ messages, latestInput, onOptionClick, installedNod
                             />
                         </Suspense>
                     );
-                } else if (debugCheckpointExt || runPipelineFailureExt) {
+                } else if (debugCheckpointExt || runPipelineFailureExt || runPipelineSurfaceContractViolationExt) {
                     // 使用DebugResult组件来处理有debug checkpoint的消息
                     // 只有在finished=true时才使用卡片形式的DebugResult，否则不设置ExtComponent，让它走普通AIMessage逻辑
                     if (message.finished) {
@@ -668,7 +677,7 @@ export function MessageList({ messages, latestInput, onOptionClick, installedNod
                             </Suspense>
                         );
                     }
-                } else if (workflowUpdateExt || paramUpdateExt || runPipelineFailureExt) {
+                } else if (workflowUpdateExt || paramUpdateExt || runPipelineFailureExt || runPipelineSurfaceContractViolationExt) {
                     // 处理工作流更新或参数更新结果消息
                     // 只有在finished=true时才使用卡片形式的DebugResult，否则不设置ExtComponent，让它走普通AIMessage逻辑
                     if (message.finished) {
@@ -691,12 +700,12 @@ export function MessageList({ messages, latestInput, onOptionClick, installedNod
                 }
 
                 // 如果有debug checkpoint且已完成，直接返回DebugResult组件
-                if ((debugCheckpointExt || runPipelineFailureExt) && message.finished && ExtComponent) {
+                if ((debugCheckpointExt || runPipelineFailureExt || runPipelineSurfaceContractViolationExt) && message.finished && ExtComponent) {
                     return ExtComponent;
                 }
 
                 // 如果有workflow_update或param_update且已完成，直接返回DebugResult组件
-                if ((workflowUpdateExt || paramUpdateExt || runPipelineFailureExt) && message.finished && ExtComponent) {
+                if ((workflowUpdateExt || paramUpdateExt || runPipelineFailureExt || runPipelineSurfaceContractViolationExt) && message.finished && ExtComponent) {
                     return ExtComponent;
                 }
 

@@ -4,6 +4,7 @@ import {
   FAILURE_SURFACE_FORMATTER_BUILD_ID,
   FAILURE_SURFACE_SCHEMA_VERSION,
   findRunPipelineFailureExt,
+  findRunPipelineSurfaceContractViolationExt,
   getRunPipelineFailureDebugSummary,
   isRunPipelineFailureExt,
 } from "../components/chat/failureSurface";
@@ -12,7 +13,7 @@ export const FAILURE_SURFACE_CACHE_SCHEMA_VERSION = "copilot-message-cache-v3";
 const DB_NAME = "ComfyUICopilotDB";
 const STORE_NAME = "chatSessions";
 const FAILURE_FINGERPRINT_PATTERN =
-  /run_pipeline_failure|Run Failed Before Image Generation|failed_stage|failure_reason|no_execution_ready_workflow/i;
+  /run_pipeline_failure|run_pipeline_surface_contract_violation|Run Failed Before Image Generation|Surface Contract Violation|failed_stage|failure_reason|no_execution_ready_workflow/i;
 const UNKNOWN_FAILURE_PATTERN = /["']?(?:failed_stage|failure_reason)["']?\s*[:=]\s*["`']?unknown["`']?/i;
 const RAW_RUN_PIPELINE_PATTERN =
   /workflow_update|["']source["']\s*:\s*["']run_pipeline["']|["']execution_status["']\s*:\s*["'](?:failed|skipped)["']/i;
@@ -30,6 +31,7 @@ type StoredMessageSummary = {
   metadata?: any;
   ext_types: string[];
   has_run_pipeline_failure_ext: boolean;
+  has_run_pipeline_surface_contract_violation_ext: boolean;
   contains_failure_fingerprint: boolean;
   contains_unknown_failure_text: boolean;
   failure_surface: ReturnType<typeof getRunPipelineFailureDebugSummary>;
@@ -254,6 +256,9 @@ function summarizeMessages(messages: Message[]): StoredMessageSummary[] {
       const extItems = Array.isArray(parsedContent?.ext) ? parsedContent.ext : [];
       const extTypes = extItems.map((item: any) => item?.type).filter(Boolean);
       const failureExt = parsedContent ? findRunPipelineFailureExt(parsedContent) : undefined;
+      const contractViolationExt = parsedContent
+        ? findRunPipelineSurfaceContractViolationExt(parsedContent)
+        : undefined;
 
       return {
         id: message.id,
@@ -262,6 +267,7 @@ function summarizeMessages(messages: Message[]): StoredMessageSummary[] {
         metadata: message.metadata || null,
         ext_types: extTypes,
         has_run_pipeline_failure_ext: Boolean(failureExt),
+        has_run_pipeline_surface_contract_violation_ext: Boolean(contractViolationExt),
         contains_failure_fingerprint: containsFailureFingerprint,
         contains_unknown_failure_text: containsUnknownFailureText,
         failure_surface: parsedContent ? getRunPipelineFailureDebugSummary(parsedContent) : null,
@@ -273,6 +279,7 @@ function summarizeMessages(messages: Message[]): StoredMessageSummary[] {
         Boolean(
           summary &&
             (summary.has_run_pipeline_failure_ext ||
+              summary.has_run_pipeline_surface_contract_violation_ext ||
               summary.contains_failure_fingerprint ||
               summary.contains_unknown_failure_text),
         ),
